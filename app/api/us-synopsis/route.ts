@@ -52,11 +52,29 @@ export async function GET() {
 
   const text = resp.output_text.trim();
   const paragraphs = text.split(/\n\s*\n/).slice(0, 2);
+const headers = {
+  "content-type": "application/json",
+  "cache-control": "s-maxage=3600, stale-while-revalidate=300",
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, OPTIONS",
+  "access-control-allow-headers": "Content-Type"
+};
 
-  return new Response(JSON.stringify({ updated_utc: new Date().toISOString(), paragraphs }), {
+return new Response(
+  JSON.stringify({
+    updated_utc: new Date().toISOString(),
+    paragraphs
+  }),
+  { headers }
+);
+export async function OPTIONS() {
+  return new Response(null, {
     headers: {
-      "content-type": "application/json",
-      "cache-control": "s-maxage=3600, stale-while-revalidate=300"
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET, OPTIONS",
+      "access-control-allow-headers": "Content-Type"
     }
   });
 }
+
+
