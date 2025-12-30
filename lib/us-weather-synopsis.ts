@@ -235,11 +235,18 @@ Highlights rules:
 - Example: "Significant lake-effect snow in Cleveland on Tuesday" NOT "Significant lake-effect snow in Cleveland on Day 1"
 
 Risk reason rules:
+- EVERY region MUST have a risk_reason field populated. This is REQUIRED.
 - Populate "risk_reason" with a 1-2 sentence explanation of why the risk score is what it is.
-- For low risk (1-2): Explain why conditions are quiet/benign. Example: "Quiet high pressure pattern brings calm conditions with no significant weather expected."
-- For moderate risk (3-4): Explain what weather is causing concern. Example: "Lake-effect snow will create localized travel issues, but impacts remain limited in coverage."
-- For elevated risk (5-6): Explain the significant hazards. Example: "Strong winds and heavy snow will create dangerous travel conditions across much of the region."
-- For high/extreme risk (7+): Explain the severe/life-threatening conditions. Example: "A major winter storm will bring blizzard conditions with 12+ inches of snow and 50+ mph winds."
+- For Very Quiet (1.0): Explain why conditions are calm with no impactful weather. Example: "High pressure dominates with no significant weather expected through the period."
+- For Quiet (2.0): Explain why conditions are mostly calm. Example: "A benign pattern persists with only minor, isolated nuisances possible."
+- For Marginal (3.0): Explain the noticeable weather features. Example: "Brief or localized disruptions possible from passing showers, especially for outdoor plans."
+- For Active (4.0): Explain what weather is developing. Example: "An active weather pattern will bring travel disruptions to parts of the region."
+- For Elevated (5.0): Explain the widespread active weather. Example: "Lake-effect snow will create localized travel issues across multiple areas."
+- For High (6.0): Explain the high-impact weather. Example: "Strong winds and heavy snow will create hazardous travel conditions in portions of the region."
+- For Significant (7.0): Explain the significant event. Example: "A significant winter storm will bring dangerous conditions to affected areas."
+- For Major (8.0): Explain the major high-impact event. Example: "A major winter storm will bring blizzard conditions; travel strongly discouraged."
+- For Severe (9.0): Explain the severe high-end event. Example: "A severe weather event with potential for major damage and prolonged disruptions."
+- For Extreme (10.0): Explain the rare/historic event. Example: "A rare, historic weather event with extreme impacts; life safety actions may be required."
 - The risk_reason should help users understand the score at a glance.
 
 Geography rules:
@@ -287,11 +294,20 @@ Forecast change:
 Why this matters:
 - One sentence explaining real-world impacts (travel, safety, infrastructure, daily life).
 
-Risk scale:
-- Assign a Max Velocity Risk Scale value from 1.0 to 10.0 (decimals allowed).
+Risk scale (Max Velocity Risk Scale):
+- Assign a risk_scale value from 1.0 to 10.0 (decimals allowed).
 - Base the value on coverage, impact severity, and confidence.
-- Quiet patterns should generally fall between 1.0–2.5.
-- Major widespread events should exceed 6.0.
+- Use these guidelines:
+  - 1.0 (Very Quiet): Little to no impactful weather, typical seasonal conditions
+  - 2.0 (Quiet): Mostly calm, minor isolated nuisances possible
+  - 3.0 (Marginal): Noticeable weather features, brief/localized disruptions possible
+  - 4.0 (Active): Active pattern developing, some travel/outdoor disruptions likely
+  - 5.0 (Elevated): Widespread active weather, travel disruptions likely in multiple areas
+  - 6.0 (High): High-impact weather expected, hazardous travel possible
+  - 7.0 (Significant): Significant weather event, dangerous conditions likely in affected areas
+  - 8.0 (Major): Major high-impact event, travel strongly discouraged
+  - 9.0 (Severe): Severe high-end event, potential for major damage and prolonged disruptions
+  - 10.0 (Extreme): Rare/historic event, extreme impacts, life safety actions may be required
 
 Highlights:
 - Write highlights LAST.
