@@ -40,6 +40,7 @@ export async function generateUSWeatherSynopsis(context: string) {
               "id",
               "name",
               "days",
+              "day_risks",
               "long_range",
               "impacts",
               "pattern_callout",
@@ -79,6 +80,17 @@ export async function generateUSWeatherSynopsis(context: string) {
                   day1: { type: "string" },
                   day2: { type: "string" },
                   day3: { type: "string" },
+                },
+              },
+
+              day_risks: {
+                type: "object",
+                additionalProperties: false,
+                required: ["day1", "day2", "day3"],
+                properties: {
+                  day1: { type: "number" },
+                  day2: { type: "number" },
+                  day3: { type: "number" },
                 },
               },
 
@@ -141,10 +153,17 @@ Content requirements for each region/day:
 - Discuss severe weather, winter storms, tropical activity, and hurricanes ONLY if the provided context indicates a credible threat.
 
 Paragraph rules (per region per day):
-- Each paragraph MUST contain at least 4 sentences.
-- If risk_scale is 3.0 or lower: use 1 paragraph (minimum 4 sentences).
-- If risk_scale is above 3.0: use 2 paragraphs (each with at least 4 sentences).
-- Use 3 paragraphs only if very active or historic (risk_scale 6.0+).
+- Each paragraph MUST contain at least 4 sentences. This is a STRICT requirement.
+- For EACH DAY individually, check that day's risk score (day_risks.day1, day_risks.day2, day_risks.day3):
+  - If day_risks for that day is 3.0 or lower: use 1 paragraph (minimum 4 sentences).
+  - If day_risks for that day is above 3.0: use 2 SEPARATE paragraphs (each with at least 4 sentences, separated by a newline).
+  - If day_risks for that day is 6.0+: use 3 paragraphs.
+- CRITICAL: Days with risk > 3.0 MUST have multiple paragraphs. Do not combine into one paragraph.
+
+Day risk scores (day_risks):
+- Assign a risk score from 1.0 to 10.0 for EACH individual day (day1, day2, day3).
+- These scores can differ day-to-day based on that day's expected impacts.
+- The overall region risk_scale should reflect the maximum or average risk across the period.
 
 Long-range (Days 4–7) rules:
 - Provide a single broad overview per region covering Days 4–7.
