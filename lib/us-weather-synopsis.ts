@@ -152,6 +152,15 @@ Content requirements for each region/day:
 - Mention notable weather phenomena if applicable (lake-effect snow, atmospheric river, blizzard conditions, ice accretion, squall line, severe storm mode, coastal flooding, etc.).
 - Discuss severe weather, winter storms, tropical activity, and hurricanes ONLY if the provided context indicates a credible threat.
 
+Detailed explanation requirements:
+- Provide DETAILED explanations for all weather impacts. Do not be vague.
+- For SNOW events: Always include expected snowfall accumulation ranges (e.g., "2-4 inches", "6-10 inches"). Specify which cities, towns, or areas will see the most snow vs. the least. Example: "Buffalo could see 8-12 inches of lake-effect snow, while Rochester sees 2-4 inches and Syracuse remains on the edge with 1-2 inches."
+- For RAIN events: Include expected rainfall amounts when significant (e.g., "1-2 inches of rain expected").
+- For WIND events: Always specify wind speeds and gusts (e.g., "sustained winds of 25-35 mph with gusts to 50 mph").
+- For TEMPERATURE extremes: Explain the impacts (e.g., "Wind chills dropping to -10°F will make exposed skin vulnerable to frostbite within 30 minutes").
+- For ICE/FREEZING RAIN: Specify ice accretion amounts (e.g., "0.25 to 0.5 inches of ice accretion possible").
+- Name specific cities and towns that will be most affected. Integrate them naturally but be specific about who sees what.
+
 Paragraph rules (per region per day):
 - Each paragraph MUST contain at least 4 sentences. This is a STRICT requirement.
 - For EACH DAY individually, check that day's risk score (day_risks.day1, day_risks.day2, day_risks.day3):
