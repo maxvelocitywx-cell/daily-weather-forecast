@@ -1,9 +1,9 @@
 {
   "functions": {
-    "app/api/synopsis/route.ts": {
+    "api/synopsis": {
       "maxDuration": 60
     },
-    "app/api/us-synopsis/route.ts": {
+    "api/us-synopsis": {
       "maxDuration": 60
     }
   }
