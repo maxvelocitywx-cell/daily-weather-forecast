@@ -38,7 +38,7 @@ export async function GET() {
   const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
 
   const resp = await client.responses.create({
-    model: "o4-mini",
+    model: "gpt-5",
     reasoning: { effort: "low" },
     instructions:
       "Write a professional 2-paragraph synopsis of weather across the United States today. " +
