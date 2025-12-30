@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "app/api/synopsis/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/us-synopsis/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}
