@@ -8,9 +8,12 @@ function isoUtcNow() {
 }
 
 function dayName(offsetDays: number) {
+  // Use Eastern Time for day labels
   const d = new Date();
-  d.setDate(d.getDate() + offsetDays);
-  return d.toLocaleDateString("en-US", { weekday: "long" });
+  const estString = d.toLocaleString("en-US", { timeZone: "America/New_York" });
+  const estDate = new Date(estString);
+  estDate.setDate(estDate.getDate() + offsetDays);
+  return estDate.toLocaleDateString("en-US", { weekday: "long" });
 }
 
 export async function GET() {
