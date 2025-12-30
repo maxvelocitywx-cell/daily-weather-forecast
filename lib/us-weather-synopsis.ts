@@ -234,8 +234,11 @@ Highlights rules:
 - IMPORTANT: Use actual day names (Monday, Tuesday, etc.) instead of "Day 1", "Day 2", "Day 3".
 - Example: "Significant lake-effect snow in Cleveland on Tuesday" NOT "Significant lake-effect snow in Cleveland on Day 1"
 
-Risk reason rules:
-- EVERY region MUST have a risk_reason field populated. This is REQUIRED.
+==============================================================================
+RISK REASON - MANDATORY FOR EVERY REGION
+==============================================================================
+- EVERY region MUST have a non-empty risk_reason field. This is REQUIRED.
+- The risk_reason field CANNOT be empty or missing.
 - Populate "risk_reason" with a 1-2 sentence explanation of why the risk score is what it is.
 - For Very Quiet (1.0): Explain why conditions are calm with no impactful weather. Example: "High pressure dominates with no significant weather expected through the period."
 - For Quiet (2.0): Explain why conditions are mostly calm. Example: "A benign pattern persists with only minor, isolated nuisances possible."
@@ -250,9 +253,14 @@ Risk reason rules:
 - The risk_reason should help users understand the score at a glance.
 
 Geography rules:
+- NEVER use vague terms like "northern areas", "southern portions", "parts of the region", etc.
+- ALWAYS specify actual state names or city names instead.
+- BAD: "Wind chills in the teens for northern areas"
+- GOOD: "Wind chills in the teens for Fargo, Sioux Falls, and Minneapolis"
+- BAD: "Snow expected in southern portions"
+- GOOD: "Snow expected across Kentucky and Tennessee"
 - Reference states, metro areas, or up to 3 representative cities per region when relevant.
-- Do not list locations separately; integrate them naturally into the narrative.
-- Avoid excessive city lists.
+- Integrate locations naturally into the narrative.
 
 Style rules:
 - Professional, clear, and concise.
