@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { generateUSWeatherSynopsis } from "@/lib/us-weather-synopsis";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 function isoUtcNow() {
   return new Date().toISOString();
