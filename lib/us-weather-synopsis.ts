@@ -31,8 +31,8 @@ export async function generateUSWeatherSynopsis(context: string) {
 
         regions: {
           type: "array",
-          minItems: 7,
-          maxItems: 7,
+          minItems: 6,
+          maxItems: 6,
           items: {
             type: "object",
             additionalProperties: false,
@@ -61,13 +61,12 @@ export async function generateUSWeatherSynopsis(context: string) {
               id: {
                 type: "string",
                 enum: [
-                  "west",
+                  "west_coast",
                   "rockies",
-                  "plains",
-                  "midwest_greatlakes",
-                  "south",
-                  "southeast",
+                  "great_plains",
+                  "midwest",
                   "northeast",
+                  "southeast",
                 ],
               },
               name: { type: "string" },
@@ -161,30 +160,57 @@ Detailed explanation requirements:
 - For ICE/FREEZING RAIN: Specify ice accretion amounts (e.g., "0.25 to 0.5 inches of ice accretion possible").
 - Name specific cities and towns that will be most affected. Integrate them naturally but be specific about who sees what.
 
-MANDATORY PARAGRAPH LENGTH RULES - STRICTLY ENFORCED:
+==============================================================================
+MANDATORY PARAGRAPH LENGTH RULES - THIS IS THE MOST IMPORTANT SECTION
+==============================================================================
 
-MINIMUM LENGTH FOR EVERY SINGLE DAY (day1, day2, day3):
-- EVERY day forecast MUST be AT LEAST 4 full sentences. NO EXCEPTIONS.
-- A sentence is a complete thought ending in a period. "Highs in the 40s." counts as one sentence.
-- Count your sentences before finalizing. If you have fewer than 4, ADD MORE DETAIL.
-- Even for quiet weather days, describe: temperatures (highs AND lows), sky conditions, wind direction/speed, and what activities/travel will be like.
+YOU MUST FOLLOW THESE RULES EXACTLY. NO SHORTCUTS. NO EXCEPTIONS.
 
-PARAGRAPH COUNT RULES BASED ON RISK:
-- day_risks 3.0 or lower: Write 1 paragraph with AT LEAST 4-5 sentences.
-- day_risks above 3.0: Write 2 SEPARATE paragraphs (use \\n\\n between them), each with AT LEAST 4 sentences. Total: 8+ sentences.
-- day_risks 6.0+: Write 3 SEPARATE paragraphs, each with AT LEAST 4 sentences. Total: 12+ sentences.
+STEP 1: CHECK THE DAY'S RISK SCORE
+Look at day_risks.day1, day_risks.day2, day_risks.day3 for each day.
 
-PARAGRAPH SEPARATION:
-- Multiple paragraphs MUST be separated by TWO newlines (\\n\\n) in the JSON string.
-- Do NOT combine everything into one long paragraph when risk > 3.0.
+STEP 2: APPLY THESE RULES FOR EACH DAY:
 
-WHAT TO INCLUDE TO REACH LENGTH REQUIREMENTS:
-- Temperature details: "Highs will reach the mid-40s in the valleys while mountain areas stay in the 30s. Overnight lows will drop into the upper 20s."
-- Wind information: "Winds will be light out of the northwest at 5-10 mph. Gusts could occasionally reach 15 mph in exposed areas."
-- Sky/precipitation: "Expect partly cloudy skies through the morning with increasing clouds by afternoon. No precipitation is expected."
-- Impact/context: "This will be a good day for outdoor activities. Roads will remain dry and travel conditions will be favorable."
+IF day_risks <= 3.0:
+  - Write 1 paragraph
+  - Minimum 5 sentences
+  - Include: temps (highs AND lows), sky conditions, winds, travel/activity impacts
 
-FAILURE TO MEET THESE REQUIREMENTS IS UNACCEPTABLE. RECOUNT YOUR SENTENCES.
+IF day_risks > 3.0 (this includes 3.1, 3.5, 4.0, 4.5, etc.):
+  - Write 2 SEPARATE paragraphs
+  - Each paragraph must have AT LEAST 4 sentences
+  - Separate paragraphs with \\n\\n in the JSON string
+  - Paragraph 1: Main weather story, conditions, temperatures
+  - Paragraph 2: Impacts, timing, specific locations affected, travel concerns
+
+IF day_risks >= 6.0:
+  - Write 3 SEPARATE paragraphs
+  - Each paragraph must have AT LEAST 4 sentences
+  - Total: 12+ sentences minimum
+
+STEP 3: COUNT YOUR SENTENCES
+Before finalizing each day's forecast, COUNT the periods. If you don't have enough sentences, ADD MORE.
+
+EXAMPLE FOR RISK 4.0 (requires 2 paragraphs, 8+ sentences):
+"Rain will spread across the region during the morning hours, becoming heavy at times by afternoon. Highs will only reach the upper 30s due to cloud cover and precipitation. Winds will be from the northeast at 15-25 mph with gusts to 35 mph possible along the coast. Temperatures will feel even colder with wind chills in the upper 20s.\\n\\nTravel conditions will deteriorate through the day, especially on secondary roads. Motorists should allow extra time for commutes and maintain safe following distances. Ponding water on roadways could create hydroplaning risks during heavier rain. The evening commute will likely be the most impacted period."
+
+WHAT MAKES A SENTENCE:
+- A complete thought ending in a period counts as 1 sentence
+- "Highs in the 40s." = 1 sentence
+- "Winds will be light." = 1 sentence
+
+COMMON TOPICS TO ADD MORE SENTENCES:
+- Temperature details (highs, lows, wind chill, heat index)
+- Wind (direction, speed, gusts)
+- Sky conditions (clouds, sun, visibility)
+- Precipitation details (type, amount, timing)
+- Travel impacts
+- Outdoor activity recommendations
+- Specific city/area conditions
+- Timing of weather changes
+
+DO NOT SUBMIT FORECASTS THAT VIOLATE THESE RULES.
+==============================================================================
 
 Day risk scores (day_risks):
 - Assign a risk score from 1.0 to 10.0 for EACH individual day (day1, day2, day3).
@@ -290,8 +316,16 @@ Call to action (CTA):
 
 Additional rules:
 - updated_utc MUST be a current ISO-8601 UTC timestamp ending in Z
-- regions MUST include exactly these 7 ids in this order:
-  west, rockies, plains, midwest_greatlakes, south, southeast, northeast
+- regions MUST include exactly these 6 ids in this order:
+  west_coast, rockies, great_plains, midwest, northeast, southeast
+
+REGION DEFINITIONS (states included in each):
+- west_coast: California, Oregon, Washington, Idaho, Nevada, Arizona, Utah
+- rockies: New Mexico, Colorado, Wyoming, Montana
+- great_plains: North Dakota, South Dakota, Nebraska, Kansas, Oklahoma, Texas, Arkansas, Louisiana
+- midwest: Minnesota, Iowa, Missouri, Illinois, Indiana, Ohio, Michigan, Wisconsin
+- northeast: Pennsylvania, New York, New Jersey, Rhode Island, Connecticut, Massachusetts, New Hampshire, Vermont, Maine
+- southeast: Kentucky, Tennessee, Mississippi, Alabama, Georgia, Florida, South Carolina, North Carolina, Virginia, West Virginia, Washington DC, Maryland, Delaware
         `.trim(),
       },
       {
