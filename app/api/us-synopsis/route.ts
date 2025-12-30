@@ -60,13 +60,15 @@ const headers = {
   "access-control-allow-headers": "Content-Type"
 };
 
-return new Response(
-  JSON.stringify({
-    updated_utc: new Date().toISOString(),
-    paragraphs
-  }),
-  { headers }
-);
+  return new Response(
+    JSON.stringify({
+      updated_utc: new Date().toISOString(),
+      paragraphs
+    }),
+    { headers }
+  );
+}
+
 export async function OPTIONS() {
   return new Response(null, {
     headers: {
