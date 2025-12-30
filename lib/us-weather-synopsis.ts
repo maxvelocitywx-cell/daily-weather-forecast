@@ -108,7 +108,7 @@ export async function generateUSWeatherSynopsis(context: string) {
               highlights: {
                 type: "array",
                 items: { type: "string" },
-                minItems: 0,
+                minItems: 2,
                 maxItems: 5,
               },
               cta: { type: "string" },
@@ -141,9 +141,10 @@ Content requirements for each region/day:
 - Discuss severe weather, winter storms, tropical activity, and hurricanes ONLY if the provided context indicates a credible threat.
 
 Paragraph rules (per region per day):
-- Use 1 paragraph if quiet.
-- Use 2 paragraphs if active.
-- Use 3 paragraphs only if very active or historic.
+- Each paragraph MUST contain at least 4 sentences.
+- If risk_scale is 3.0 or lower: use 1 paragraph (minimum 4 sentences).
+- If risk_scale is above 3.0: use 2 paragraphs (each with at least 4 sentences).
+- Use 3 paragraphs only if very active or historic (risk_scale 6.0+).
 
 Long-range (Days 4–7) rules:
 - Provide a single broad overview per region covering Days 4–7.
@@ -154,8 +155,8 @@ Long-range (Days 4–7) rules:
 - Use 1 paragraph only.
 
 Highlights rules:
-- Provide 2–5 highlights depending on activity.
-- Fewer if quiet, more if active.
+- Every region MUST have at least 2 highlights, maximum 5.
+- More highlights (3-5) for active weather, but never fewer than 2.
 - Each highlight must be short, scannable, and impact-focused.
 
 Geography rules:
