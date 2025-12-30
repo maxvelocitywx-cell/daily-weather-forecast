@@ -55,6 +55,7 @@ export async function generateUSWeatherSynopsis(context: string) {
               "why_this_matters",
               "risk_scale",
               "highlights",
+              "risk_reason",
               "cta",
             ],
             properties: {
@@ -122,6 +123,7 @@ export async function generateUSWeatherSynopsis(context: string) {
                 minItems: 2,
                 maxItems: 5,
               },
+              risk_reason: { type: "string" },
               cta: { type: "string" },
             },
           },
@@ -229,6 +231,16 @@ Highlights rules:
 - Every region MUST have at least 2 highlights, maximum 5.
 - More highlights (3-5) for active weather, but never fewer than 2.
 - Each highlight must be short, scannable, and impact-focused.
+- IMPORTANT: Use actual day names (Monday, Tuesday, etc.) instead of "Day 1", "Day 2", "Day 3".
+- Example: "Significant lake-effect snow in Cleveland on Tuesday" NOT "Significant lake-effect snow in Cleveland on Day 1"
+
+Risk reason rules:
+- Populate "risk_reason" with a 1-2 sentence explanation of why the risk score is what it is.
+- For low risk (1-2): Explain why conditions are quiet/benign. Example: "Quiet high pressure pattern brings calm conditions with no significant weather expected."
+- For moderate risk (3-4): Explain what weather is causing concern. Example: "Lake-effect snow will create localized travel issues, but impacts remain limited in coverage."
+- For elevated risk (5-6): Explain the significant hazards. Example: "Strong winds and heavy snow will create dangerous travel conditions across much of the region."
+- For high/extreme risk (7+): Explain the severe/life-threatening conditions. Example: "A major winter storm will bring blizzard conditions with 12+ inches of snow and 50+ mph winds."
+- The risk_reason should help users understand the score at a glance.
 
 Geography rules:
 - Reference states, metro areas, or up to 3 representative cities per region when relevant.
