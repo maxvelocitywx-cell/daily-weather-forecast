@@ -134,7 +134,7 @@ export async function generateUSWeatherSynopsis(context: string) {
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.2,
-    max_tokens: 8000,
+    max_tokens: 16000,
     messages: [
       {
         role: "system",
@@ -161,13 +161,30 @@ Detailed explanation requirements:
 - For ICE/FREEZING RAIN: Specify ice accretion amounts (e.g., "0.25 to 0.5 inches of ice accretion possible").
 - Name specific cities and towns that will be most affected. Integrate them naturally but be specific about who sees what.
 
-Paragraph rules (per region per day):
-- Each paragraph MUST contain at least 4 sentences. This is a STRICT requirement.
-- For EACH DAY individually, check that day's risk score (day_risks.day1, day_risks.day2, day_risks.day3):
-  - If day_risks for that day is 3.0 or lower: use 1 paragraph (minimum 4 sentences).
-  - If day_risks for that day is above 3.0: use 2 SEPARATE paragraphs (each with at least 4 sentences, separated by a newline).
-  - If day_risks for that day is 6.0+: use 3 paragraphs.
-- CRITICAL: Days with risk > 3.0 MUST have multiple paragraphs. Do not combine into one paragraph.
+MANDATORY PARAGRAPH LENGTH RULES - STRICTLY ENFORCED:
+
+MINIMUM LENGTH FOR EVERY SINGLE DAY (day1, day2, day3):
+- EVERY day forecast MUST be AT LEAST 4 full sentences. NO EXCEPTIONS.
+- A sentence is a complete thought ending in a period. "Highs in the 40s." counts as one sentence.
+- Count your sentences before finalizing. If you have fewer than 4, ADD MORE DETAIL.
+- Even for quiet weather days, describe: temperatures (highs AND lows), sky conditions, wind direction/speed, and what activities/travel will be like.
+
+PARAGRAPH COUNT RULES BASED ON RISK:
+- day_risks 3.0 or lower: Write 1 paragraph with AT LEAST 4-5 sentences.
+- day_risks above 3.0: Write 2 SEPARATE paragraphs (use \\n\\n between them), each with AT LEAST 4 sentences. Total: 8+ sentences.
+- day_risks 6.0+: Write 3 SEPARATE paragraphs, each with AT LEAST 4 sentences. Total: 12+ sentences.
+
+PARAGRAPH SEPARATION:
+- Multiple paragraphs MUST be separated by TWO newlines (\\n\\n) in the JSON string.
+- Do NOT combine everything into one long paragraph when risk > 3.0.
+
+WHAT TO INCLUDE TO REACH LENGTH REQUIREMENTS:
+- Temperature details: "Highs will reach the mid-40s in the valleys while mountain areas stay in the 30s. Overnight lows will drop into the upper 20s."
+- Wind information: "Winds will be light out of the northwest at 5-10 mph. Gusts could occasionally reach 15 mph in exposed areas."
+- Sky/precipitation: "Expect partly cloudy skies through the morning with increasing clouds by afternoon. No precipitation is expected."
+- Impact/context: "This will be a good day for outdoor activities. Roads will remain dry and travel conditions will be favorable."
+
+FAILURE TO MEET THESE REQUIREMENTS IS UNACCEPTABLE. RECOUNT YOUR SENTENCES.
 
 Day risk scores (day_risks):
 - Assign a risk score from 1.0 to 10.0 for EACH individual day (day1, day2, day3).
