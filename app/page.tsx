@@ -13,8 +13,9 @@ import { National7DayTable } from '@/components/National7DayTable';
 import { NDFDRecordsMap } from '@/components/NDFDRecordsMap';
 import WeatherAlerts from '@/components/WeatherAlerts';
 import { SoundingsTab } from '@/components/soundings/SoundingsTab';
+import HeadlinesList from '@/components/headlines/HeadlinesList';
 
-type TabId = 'alerts' | 'forecast' | 'records' | 'soundings';
+type TabId = 'headlines' | 'alerts' | 'forecast' | 'records' | 'soundings';
 
 export default function HomePage() {
   const router = useRouter();
@@ -52,7 +53,18 @@ export default function HomePage() {
 
       {/* Tab Navigation */}
       <div className="max-w-7xl mx-auto px-4 pt-4">
-        <div className="flex gap-2 bg-mv-bg-secondary rounded-lg p-1 w-fit">
+        <div className="flex flex-wrap gap-2 bg-mv-bg-secondary rounded-lg p-1 w-fit">
+          <button
+            onClick={() => setActiveTab('headlines')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+              activeTab === 'headlines'
+                ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md'
+                : 'text-mv-text-muted hover:text-mv-text-primary hover:bg-white/5'
+            }`}
+          >
+            <span className="text-base">📰</span>
+            Headlines
+          </button>
           <button
             onClick={() => setActiveTab('alerts')}
             className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
@@ -101,7 +113,20 @@ export default function HomePage() {
       </div>
 
       <main className="flex-1 max-w-7xl mx-auto px-4 py-6 w-full">
-        {activeTab === 'alerts' ? (
+        {activeTab === 'headlines' ? (
+          /* Headlines Tab */
+          <div className="space-y-6">
+            <div className="text-center mb-8">
+              <h1 className="text-3xl md:text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-400 via-orange-500 to-red-500">
+                Top 10 Weather Headlines
+              </h1>
+              <p className="text-gray-400 mt-2">
+                Real-time weather reports and forecasts across the United States
+              </p>
+            </div>
+            <HeadlinesList />
+          </div>
+        ) : activeTab === 'alerts' ? (
           <WeatherAlerts />
         ) : activeTab === 'forecast' ? (
           <>

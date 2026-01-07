@@ -9,5 +9,11 @@
     "app/**/*.ts": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/headlines",
+      "schedule": "*/15 * * * *"
+    }
+  ]
 }
