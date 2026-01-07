@@ -11,7 +11,7 @@ import {
   SPCMDFact,
   EROFact,
   TropicalFact,
-  FactsBundle,
+  LegacyFactsBundle,
   EventFact,
 } from './types';
 import { fetchLSRFacts, fetchSignificantLSRFacts } from './lsr-fetcher';
@@ -380,9 +380,10 @@ export async function fetchAllEventFacts(): Promise<EventFact[]> {
 
 /**
  * Build the complete facts bundle for headline generation
+ * @deprecated Use buildVerifiedFactsBundle from verified-fetchers instead
  */
-export async function buildFactsBundle(): Promise<FactsBundle> {
-  console.log('[Fetchers] Building facts bundle...');
+export async function buildFactsBundle(): Promise<LegacyFactsBundle> {
+  console.log('[Fetchers] Building legacy facts bundle...');
 
   // Fetch all data sources in parallel
   const [alerts, spcOutlooks, spcMds, eroOutlooks, tropical, eventFacts] = await Promise.all([
@@ -400,7 +401,7 @@ export async function buildFactsBundle(): Promise<FactsBundle> {
     .map(a => a.event)
     .filter((v, i, arr) => arr.indexOf(v) === i);
 
-  const bundle: FactsBundle = {
+  const bundle: LegacyFactsBundle = {
     generated_at: new Date().toISOString(),
     event_facts: eventFacts,
     alerts,

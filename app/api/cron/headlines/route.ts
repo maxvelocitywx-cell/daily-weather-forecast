@@ -5,11 +5,13 @@
  * Called by Vercel Cron or external scheduler.
  *
  * Security: Requires CRON_SECRET header in production.
+ *
+ * Uses the verified headlines system with strict fact validation.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { buildFactsBundle } from '@/lib/headlines/fetchers';
-import { generateHeadlines } from '@/lib/headlines/generator';
+import { buildVerifiedFactsBundle } from '@/lib/headlines/verified-fetchers';
+import { generateVerifiedHeadlines } from '@/lib/headlines/verified-generator';
 import { storeHeadlinesRun, needsNewRun, getLatestRun } from '@/lib/headlines/storage';
 
 export const dynamic = 'force-dynamic';
@@ -44,21 +46,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('[Headlines Cron] Starting headlines generation...');
+    console.log('[Headlines Cron] Starting verified headlines generation...');
 
-    // Fetch all data sources
-    const facts = await buildFactsBundle();
-    console.log(`[Headlines Cron] Fetched facts: ${facts.alerts.length} alerts, ${facts.spc_outlooks.length} SPC, ${facts.ero_outlooks.length} ERO`);
+    // Fetch all data sources and build verified facts bundle
+    const factsBundle = await buildVerifiedFactsBundle();
+    console.log(`[Headlines Cron] Fetched ${factsBundle.facts.length} verified facts`);
+    console.log(`[Headlines Cron] Breakdown: ${factsBundle.counts.alerts} alerts, ${factsBundle.counts.lsr} LSR, ${factsBundle.counts.station_obs} station obs`);
 
-    // Generate headlines using OpenAI
-    const headlines = await generateHeadlines(facts, apiKey);
-    console.log(`[Headlines Cron] Generated ${headlines.length} headlines`);
+    // Generate headlines with strict fact validation
+    const headlines = await generateVerifiedHeadlines(factsBundle, apiKey);
+    console.log(`[Headlines Cron] Generated ${headlines.length} verified headlines`);
+
+    // Build facts summary
+    const factsSummary = [
+      `${factsBundle.counts.alerts} alerts`,
+      `${factsBundle.counts.lsr} storm reports`,
+      `${factsBundle.counts.station_obs} station obs`,
+      `${factsBundle.counts.spc} SPC outlooks`,
+      `${factsBundle.counts.wpc} WPC ERO`,
+    ].filter(s => !s.startsWith('0 ')).join(', ');
 
     // Store the run
-    const run = storeHeadlinesRun(
-      headlines,
-      `${facts.alerts.length} alerts, ${facts.spc_outlooks.length} SPC outlooks, ${facts.ero_outlooks.length} ERO outlooks`
-    );
+    const run = storeHeadlinesRun(headlines, factsSummary);
 
     console.log(`[Headlines Cron] Stored run ${run.id}`);
 
@@ -67,6 +76,7 @@ export async function POST(request: NextRequest) {
       run_id: run.id,
       timestamp: run.timestamp,
       headline_count: headlines.length,
+      facts_count: factsBundle.facts.length,
     });
   } catch (error) {
     console.error('[Headlines Cron] Error:', error);

@@ -8,7 +8,7 @@
  */
 
 import OpenAI from 'openai';
-import { FactsBundle, Headline, HeadlinesSchema, EventFact } from './types';
+import { LegacyFactsBundle, Headline, HeadlinesSchema, EventFact } from './types';
 
 const SYSTEM_PROMPT = `You are a professional meteorologist and weather news editor for a major US weather service.
 Your job is to generate 10 concise, accurate weather headlines based ONLY on the provided data.
@@ -62,9 +62,10 @@ If there aren't 10 significant stories from real-time data, fill remaining slots
 
 /**
  * Generate headlines using OpenAI with structured outputs
+ * @deprecated Use generateVerifiedHeadlines from verified-generator instead
  */
 export async function generateHeadlines(
-  facts: FactsBundle,
+  facts: LegacyFactsBundle,
   apiKey: string
 ): Promise<Headline[]> {
   const client = new OpenAI({ apiKey });
@@ -104,12 +105,15 @@ export async function generateHeadlines(
     // Ensure exactly 10 headlines
     while (headlines.length < 10) {
       headlines.push({
+        id: `h${headlines.length + 1}`,
         headline: 'Quiet weather pattern expected across much of the nation',
         topic: 'general',
-        regions: ['United States'],
-        confidence: 'low',
+        confidence_label: 'Low',
+        location: { state: 'United States', place: 'Nationwide' },
+        timestamp_utc: new Date().toISOString(),
         source_name: 'NWS National Overview',
         source_url: 'https://www.weather.gov/',
+        fact_ids: [],
       });
     }
 
@@ -123,7 +127,7 @@ export async function generateHeadlines(
 /**
  * Build a compact facts prompt for the model
  */
-function buildFactsPrompt(facts: FactsBundle): string {
+function buildFactsPrompt(facts: LegacyFactsBundle): string {
   const sections: string[] = [];
 
   sections.push(`=== WEATHER DATA BUNDLE (${facts.generated_at}) ===\n`);
@@ -318,15 +322,16 @@ function getTimeAgo(date: Date): string {
 }
 
 /**
- * Deduplicate headlines by checking for similar topics/regions
+ * Deduplicate headlines by checking for similar topics/locations
  */
 function deduplicateHeadlines(headlines: Headline[]): Headline[] {
   const seen = new Set<string>();
   const result: Headline[] = [];
 
   for (const headline of headlines) {
-    // Create a key based on topic and first region
-    const key = `${headline.topic}-${headline.regions[0] || 'us'}`.toLowerCase();
+    // Create a key based on topic and location
+    const locationKey = headline.location?.state || 'us';
+    const key = `${headline.topic}-${locationKey}`.toLowerCase();
 
     // Also check for very similar headlines
     const headlineLower = headline.headline.toLowerCase();

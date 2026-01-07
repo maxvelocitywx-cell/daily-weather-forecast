@@ -92,33 +92,41 @@ function generateRunId(): string {
 export function initializeWithSeedData(): void {
   if (latestRun) return;
 
+  const now = new Date().toISOString();
+
   // Create placeholder data for initial load
   const seedHeadlines: Headline[] = [
     {
+      id: 'seed1',
       headline: 'Headlines updating - refresh in a moment',
       topic: 'general',
-      regions: ['United States'],
-      confidence: 'medium',
+      confidence_label: 'Low',
+      location: { state: 'United States', place: 'Nationwide' },
+      timestamp_utc: now,
       source_name: 'System',
       source_url: 'https://www.weather.gov/',
+      fact_ids: [],
     },
   ];
 
   // Fill to 10
   while (seedHeadlines.length < 10) {
     seedHeadlines.push({
+      id: `seed${seedHeadlines.length + 1}`,
       headline: 'Loading latest weather data...',
       topic: 'general',
-      regions: ['United States'],
-      confidence: 'low',
+      confidence_label: 'Low',
+      location: { state: 'United States', place: 'Nationwide' },
+      timestamp_utc: now,
       source_name: 'System',
       source_url: 'https://www.weather.gov/',
+      fact_ids: [],
     });
   }
 
   latestRun = {
     id: 'seed_initial',
-    timestamp: new Date().toISOString(),
+    timestamp: now,
     headlines: seedHeadlines,
     facts_summary: 'Initial seed data - waiting for first update',
   };

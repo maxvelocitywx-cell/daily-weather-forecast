@@ -1,7 +1,7 @@
 'use client';
 
-import { ExternalLink, Clock, MapPin } from 'lucide-react';
-import { Headline, HeadlineTopic, HeadlineConfidence } from '@/lib/headlines/types';
+import { ExternalLink, Clock, MapPin, CheckCircle } from 'lucide-react';
+import { Headline, HeadlineTopic, ConfidenceLabel } from '@/lib/headlines/types';
 
 // Topic colors and icons
 const topicConfig: Record<HeadlineTopic, { bg: string; border: string; glow: string; text: string; icon: string }> = {
@@ -70,39 +70,35 @@ const topicConfig: Record<HeadlineTopic, { bg: string; border: string; glow: str
   },
 };
 
-// Confidence badge styles - distinguishing measured/reported/surveyed from outlook-based
-const confidenceConfig: Record<HeadlineConfidence, { bg: string; text: string; border: string; label: string }> = {
-  measured: {
+// Confidence badge styles - based on source type
+const confidenceConfig: Record<ConfidenceLabel, { bg: string; text: string; border: string; label: string; icon?: string }> = {
+  Measured: {
     bg: 'bg-emerald-500/20',
     text: 'text-emerald-400',
     border: 'border-emerald-500/30',
     label: 'Measured',
+    icon: '📊',
   },
-  reported: {
+  Reported: {
     bg: 'bg-amber-500/20',
     text: 'text-amber-400',
     border: 'border-amber-500/30',
     label: 'Reported',
+    icon: '📝',
   },
-  surveyed: {
-    bg: 'bg-violet-500/20',
-    text: 'text-violet-400',
-    border: 'border-violet-500/30',
-    label: 'Surveyed',
-  },
-  high: {
+  High: {
     bg: 'bg-green-500/20',
     text: 'text-green-400',
     border: 'border-green-500/30',
     label: 'High',
   },
-  medium: {
+  Medium: {
     bg: 'bg-yellow-500/20',
     text: 'text-yellow-400',
     border: 'border-yellow-500/30',
     label: 'Medium',
   },
-  low: {
+  Low: {
     bg: 'bg-gray-500/20',
     text: 'text-gray-400',
     border: 'border-gray-500/30',
@@ -135,16 +131,16 @@ function formatTimeAgo(timestamp: string): string {
 }
 
 /**
- * Check if this is a real-time observation headline (has lat/lon)
+ * Check if headline has verified fact references
  */
-function isRealTimeHeadline(headline: Headline): boolean {
-  return headline.lat !== undefined && headline.lon !== undefined;
+function hasFactReferences(headline: Headline): boolean {
+  return headline.fact_ids && headline.fact_ids.length > 0;
 }
 
 export default function HeadlineCard({ headline, rank }: HeadlineCardProps) {
   const config = topicConfig[headline.topic] || topicConfig.general;
-  const confConfig = confidenceConfig[headline.confidence] || confidenceConfig.low;
-  const isRealTime = isRealTimeHeadline(headline);
+  const confConfig = confidenceConfig[headline.confidence_label] || confidenceConfig.Low;
+  const isVerified = hasFactReferences(headline);
 
   return (
     <div
@@ -188,48 +184,41 @@ export default function HeadlineCard({ headline, rank }: HeadlineCardProps) {
             {headline.topic}
           </span>
 
-          {/* Confidence badge - prominent for real-time data */}
+          {/* Confidence badge */}
           <span
             className={`
-              px-2.5 py-1 rounded-full text-xs font-medium border
+              px-2.5 py-1 rounded-full text-xs font-medium border flex items-center gap-1
               ${confConfig.bg} ${confConfig.text} ${confConfig.border}
-              ${isRealTime ? 'ring-1 ring-offset-1 ring-offset-gray-900' : ''}
             `}
           >
+            {confConfig.icon && <span>{confConfig.icon}</span>}
             {confConfig.label}
           </span>
 
-          {/* Timestamp (for real-time events) */}
-          {headline.timestamp && (
+          {/* Timestamp */}
+          {headline.timestamp_utc && (
             <span className="flex items-center gap-1 px-2 py-0.5 bg-white/5 rounded text-xs text-gray-400 border border-white/10">
               <Clock size={10} />
-              {formatTimeAgo(headline.timestamp)}
+              {formatTimeAgo(headline.timestamp_utc)}
             </span>
           )}
 
-          {/* Location dot indicator (for real-time events with coordinates) */}
-          {isRealTime && (
+          {/* Verified indicator */}
+          {isVerified && (
             <span
-              className="flex items-center gap-1 px-2 py-0.5 bg-cyan-500/10 rounded text-xs text-cyan-400 border border-cyan-500/20"
-              title={`${headline.lat?.toFixed(2)}, ${headline.lon?.toFixed(2)}`}
+              className="flex items-center gap-1 px-2 py-0.5 bg-emerald-500/10 rounded text-xs text-emerald-400 border border-emerald-500/20"
+              title={`Backed by ${headline.fact_ids.length} verified fact(s)`}
             >
-              <MapPin size={10} />
-              <span className="hidden sm:inline">Location</span>
+              <CheckCircle size={10} />
+              <span className="hidden sm:inline">Verified</span>
             </span>
           )}
 
-          {/* Regions */}
-          {headline.regions.slice(0, 2).map((region) => (
-            <span
-              key={region}
-              className="px-2 py-0.5 bg-white/5 rounded text-xs font-medium text-gray-300 border border-white/10"
-            >
-              {region}
-            </span>
-          ))}
-          {headline.regions.length > 2 && (
-            <span className="text-xs text-gray-500">+{headline.regions.length - 2}</span>
-          )}
+          {/* Location */}
+          <span className="flex items-center gap-1 px-2 py-0.5 bg-white/5 rounded text-xs text-gray-300 border border-white/10">
+            <MapPin size={10} />
+            {headline.location.place}, {headline.location.state}
+          </span>
         </div>
 
         {/* Source link */}
@@ -247,8 +236,8 @@ export default function HeadlineCard({ headline, rank }: HeadlineCardProps) {
         </a>
       </div>
 
-      {/* Real-time indicator dot in corner */}
-      {isRealTime && (
+      {/* Verified indicator dot in corner */}
+      {isVerified && (
         <div className="absolute top-3 right-3">
           <div className="relative">
             <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
