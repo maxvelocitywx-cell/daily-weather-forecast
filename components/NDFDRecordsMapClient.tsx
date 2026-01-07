@@ -949,8 +949,8 @@ export default function NDFDRecordsMapClient() {
           </div>
         )}
 
-        {/* Temperature Legend */}
-        <div className="absolute bottom-4 left-4 right-4 bg-white/95 rounded-lg p-3 z-10 shadow-lg border border-gray-200">
+        {/* Temperature Legend - temporarily hidden */}
+        {/* <div className="absolute bottom-4 left-4 right-4 bg-white/95 rounded-lg p-3 z-10 shadow-lg border border-gray-200">
           <p className="text-xs text-gray-700 mb-2 font-semibold">Temperature (°F)</p>
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-800 font-bold">-40°</span>
@@ -963,7 +963,7 @@ export default function NDFDRecordsMapClient() {
             />
             <span className="text-xs text-gray-800 font-bold">110°</span>
           </div>
-        </div>
+        </div> */}
       </div>
 
       {/* Summary Table */}
