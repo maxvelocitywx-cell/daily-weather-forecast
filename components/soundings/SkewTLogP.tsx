@@ -17,8 +17,8 @@ const DEFAULT_SIZE = 400;
 const MARGIN = { top: 20, right: 40, bottom: 40, left: 50 };
 
 // Pressure range (bottom to top)
-const P_BOTTOM = 1050;
-const P_TOP = 100;
+const P_BOTTOM = 1000;
+const P_TOP = 200;
 
 // Temperature range in Celsius (at 1000mb reference)
 const T_LEFT = -40;
@@ -58,7 +58,7 @@ export function SkewTLogP({
     const lines: ReactNode[] = [];
 
     // Pressure levels (isobars)
-    const pressureLevels = [1000, 925, 850, 700, 500, 400, 300, 200, 150, 100];
+    const pressureLevels = [1000, 925, 850, 700, 500, 400, 300, 200];
     pressureLevels.forEach((p, i) => {
       const y = pToY(p);
       lines.push(
