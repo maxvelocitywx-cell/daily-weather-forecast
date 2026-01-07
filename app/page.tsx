@@ -1,107 +1,154 @@
-import WeatherAlerts from '@/components/WeatherAlerts';
+'use client';
 
-export default function Home() {
+import { useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import { RegionId } from '@/lib/types';
+import { useWeatherData, useRegionCities } from '@/hooks/useWeather';
+import { Header, Footer } from '@/components/UpdateBar';
+import { UpdateBar } from '@/components/UpdateBar';
+import { NationalSummary, NationalSummarySkeleton } from '@/components/NationalSummary';
+import { WeatherMap, MapPlaceholder } from '@/components/WeatherMap';
+import { RegionList } from '@/components/RegionList';
+import { National7DayTable } from '@/components/National7DayTable';
+import { NDFDRecordsMap } from '@/components/NDFDRecordsMap';
+
+type TabId = 'forecast' | 'records';
+
+export default function HomePage() {
+  const router = useRouter();
+  const [activeTab, setActiveTab] = useState<TabId>('forecast');
+  const [selectedDay, setSelectedDay] = useState(1);
+  const [selectedRegion, setSelectedRegion] = useState<RegionId | null>(null);
+
+  const { data: weatherData, isLoading: weatherLoading, mutate } = useWeatherData();
+  const { data: citiesData, isLoading: citiesLoading } = useRegionCities();
+
+  const handleRefresh = useCallback(() => {
+    mutate();
+  }, [mutate]);
+
+  const handleRegionSelect = useCallback((regionId: RegionId | null) => {
+    setSelectedRegion(regionId);
+  }, []);
+
+  // Navigate to city detail page when clicking on a city in the list
+  const handleCitySelect = useCallback((cityId: string) => {
+    const dayKey = `day${selectedDay}`;
+    router.push(`/city/${cityId}?day=${dayKey}`);
+  }, [router, selectedDay]);
+
+  const isLoading = weatherLoading || citiesLoading;
+
   return (
-    <div className="min-h-screen">
-      {/* Header */}
-      <header className="sticky top-0 z-50 glass-strong">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-              <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">Max Velocity Weather</h1>
-              <p className="text-xs text-gray-500">Real-time US Weather Intelligence</p>
-            </div>
-          </div>
+    <div className="min-h-screen flex flex-col">
+      <Header />
+      <UpdateBar
+        lastUpdated={weatherData?.fetchedAt || null}
+        isLoading={isLoading}
+        onRefresh={handleRefresh}
+      />
 
-          <nav className="hidden sm:flex items-center gap-6">
-            <a href="#alerts" className="text-sm text-gray-400 hover:text-white transition-colors">
-              Alerts
-            </a>
-            <a href="#forecast" className="text-sm text-gray-400 hover:text-white transition-colors">
-              Forecast
-            </a>
-            <a href="#map" className="text-sm text-gray-400 hover:text-white transition-colors">
-              Map
-            </a>
-          </nav>
+      {/* Tab Navigation */}
+      <div className="max-w-7xl mx-auto px-4 pt-4">
+        <div className="flex gap-2 bg-mv-bg-secondary rounded-lg p-1 w-fit">
+          <button
+            onClick={() => setActiveTab('forecast')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              activeTab === 'forecast'
+                ? 'bg-mv-accent-blue text-white shadow-md'
+                : 'text-mv-text-muted hover:text-mv-text-primary hover:bg-white/5'
+            }`}
+          >
+            Regional Forecast
+          </button>
+          <button
+            onClick={() => setActiveTab('records')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              activeTab === 'records'
+                ? 'bg-mv-accent-blue text-white shadow-md'
+                : 'text-mv-text-muted hover:text-mv-text-primary hover:bg-white/5'
+            }`}
+          >
+            Temperature Records
+          </button>
         </div>
-      </header>
+      </div>
 
-      {/* Main content */}
-      <main>
-        {/* Hero section */}
-        <section className="relative py-16 overflow-hidden">
-          {/* Background glow */}
-          <div className="absolute top-0 left-1/4 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl" />
-          <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl" />
+      <main className="flex-1 max-w-7xl mx-auto px-4 py-6 w-full">
+        {activeTab === 'forecast' ? (
+          <>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Left column - National Summary and Map */}
+              <div className="lg:col-span-2 space-y-6">
+                {/* National Summary */}
+                {isLoading || !weatherData ? (
+                  <NationalSummarySkeleton />
+                ) : (
+                  <NationalSummary
+                    regionRisks={weatherData.regions}
+                    national={weatherData.national}
+                    selectedDay={selectedDay}
+                    onDayChange={setSelectedDay}
+                  />
+                )}
 
-          <div className="max-w-6xl mx-auto px-4 text-center relative z-10">
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass mb-6">
-              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-              <span className="text-sm text-gray-400">System Operational</span>
+                {/* Map - responsive height: 50-60vh mobile, 70-85vh desktop */}
+                <div className="bg-mv-bg-secondary rounded-xl border border-white/5 overflow-hidden">
+                  <div className="p-4 border-b border-white/5">
+                    <h3 className="text-lg font-semibold text-mv-text-primary">
+                      Regional Risk Map
+                    </h3>
+                    <p className="text-sm text-mv-text-muted mt-1">
+                      Click on a region or city for details
+                    </p>
+                  </div>
+                  <div className="h-[55vh] lg:h-[75vh] min-h-[400px] max-h-[900px]">
+                    <WeatherMap
+                      regionRisks={weatherData?.regions || {}}
+                      cities={citiesData || []}
+                      selectedRegion={selectedRegion}
+                      selectedDay={selectedDay}
+                      onRegionSelect={handleRegionSelect}
+                      onDayChange={setSelectedDay}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Right column - Region List */}
+              <div className="lg:col-span-1">
+                <RegionList
+                  regionRisks={weatherData?.regions || {}}
+                  cities={citiesData || []}
+                  selectedDay={selectedDay}
+                  onDayChange={setSelectedDay}
+                  onCitySelect={handleCitySelect}
+                  onRegionSelect={handleRegionSelect}
+                  isLoading={isLoading}
+                />
+              </div>
             </div>
 
-            <h2 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white mb-4 tracking-tight">
-              Weather Intelligence
-              <br />
-              <span className="text-gradient-cyan">at a Glance</span>
-            </h2>
-
-            <p className="text-lg text-gray-400 max-w-2xl mx-auto mb-8">
-              Real-time weather alerts ranked by severity and population impact.
-              Stay informed with data sourced directly from the National Weather Service.
-            </p>
-
-            <div className="flex flex-wrap justify-center gap-4">
-              <a
-                href="#alerts"
-                className="px-6 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-medium rounded-xl hover:shadow-lg hover:shadow-cyan-500/25 transition-all duration-200 flex items-center gap-2"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                View Active Alerts
-              </a>
-              <a
-                href="/api/alerts"
-                target="_blank"
-                className="px-6 py-3 glass hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all duration-200 flex items-center gap-2"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                </svg>
-                API Endpoint
-              </a>
+            {/* 7-Day National Forecast Table */}
+            <div className="mt-8">
+              <National7DayTable />
             </div>
+          </>
+        ) : (
+          /* Temperature Records Tab */
+          <div className="space-y-4">
+            <div className="bg-mv-bg-secondary rounded-xl border border-white/5 p-4">
+              <h2 className="text-xl font-bold text-mv-text-primary">Temperature Records Tracker</h2>
+              <p className="text-sm text-mv-text-muted mt-1">
+                NDFD forecast temperatures compared to historical records from WPC
+              </p>
+            </div>
+            <NDFDRecordsMap />
           </div>
-        </section>
-
-        {/* Alerts section */}
-        <section id="alerts">
-          <WeatherAlerts />
-        </section>
+        )}
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-white/5 mt-12">
-        <div className="max-w-6xl mx-auto px-4 py-8">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-2 text-sm text-gray-500">
-              <span>&copy; {new Date().getFullYear()} Max Velocity Weather</span>
-              <span className="hidden sm:inline">|</span>
-              <span className="hidden sm:inline">Accurate. Honest. Reliable.</span>
-            </div>
-            <div className="flex items-center gap-4 text-sm text-gray-600">
-              <span>Data: National Weather Service</span>
-            </div>
-          </div>
-        </div>
-      </footer>
+      <Footer />
     </div>
   );
 }
