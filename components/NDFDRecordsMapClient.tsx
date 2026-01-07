@@ -161,7 +161,7 @@ export default function NDFDRecordsMapClient() {
 
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: 'mapbox://styles/mapbox/light-v11',
       center: [-96, 38],
       zoom: 3.8,
       minZoom: 3,
@@ -187,46 +187,46 @@ export default function NDFDRecordsMapClient() {
         }
       }
 
-      // Style roads red
+      // Style roads - subtle gray for light theme
       style.layers.forEach((layer) => {
         if (layer.type === 'line' && layer.id.includes('road')) {
-          let color = '#cc3333';
-          let width: mapboxgl.Expression = ['interpolate', ['linear'], ['zoom'], 5, 1, 8, 2, 12, 4];
+          let color = '#9ca3af';
+          let width: mapboxgl.Expression = ['interpolate', ['linear'], ['zoom'], 5, 0.5, 8, 1, 12, 2];
 
           if (layer.id.includes('motorway') || layer.id.includes('trunk') || layer.id.includes('highway')) {
-            color = '#8B0000';
-            width = ['interpolate', ['linear'], ['zoom'], 4, 1, 6, 2, 8, 4, 12, 6];
+            color = '#6b7280';
+            width = ['interpolate', ['linear'], ['zoom'], 4, 0.5, 6, 1, 8, 2, 12, 3];
           } else if (layer.id.includes('primary')) {
-            color = '#cc3333';
-            width = ['interpolate', ['linear'], ['zoom'], 6, 0.5, 8, 2, 12, 4];
+            color = '#9ca3af';
+            width = ['interpolate', ['linear'], ['zoom'], 6, 0.5, 8, 1, 12, 2];
           } else if (layer.id.includes('secondary') || layer.id.includes('tertiary')) {
-            color = '#ff5555';
-            width = ['interpolate', ['linear'], ['zoom'], 7, 0.5, 10, 1.5, 14, 3];
+            color = '#d1d5db';
+            width = ['interpolate', ['linear'], ['zoom'], 7, 0.5, 10, 1, 14, 1.5];
           } else if (layer.id.includes('street') || layer.id.includes('minor') || layer.id.includes('service')) {
-            color = '#ff7777';
-            width = ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5];
+            color = '#e5e7eb';
+            width = ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1];
           }
 
           if (layer.id.includes('case')) {
-            color = '#4a0000';
+            color = '#f3f4f6';
           }
 
           try {
             map.current?.setPaintProperty(layer.id, 'line-color', color);
             map.current?.setPaintProperty(layer.id, 'line-width', width);
-            map.current?.setPaintProperty(layer.id, 'line-opacity', 1);
+            map.current?.setPaintProperty(layer.id, 'line-opacity', 0.8);
           } catch {
             // Ignore errors
           }
         }
       });
 
-      // Style labels white
+      // Style labels - dark text with white halo for light theme
       style.layers.forEach((layer) => {
         if (layer.type === 'symbol') {
           try {
-            map.current?.setPaintProperty(layer.id, 'text-color', '#ffffff');
-            map.current?.setPaintProperty(layer.id, 'text-halo-color', 'rgba(0, 0, 0, 0.9)');
+            map.current?.setPaintProperty(layer.id, 'text-color', '#1f2937');
+            map.current?.setPaintProperty(layer.id, 'text-halo-color', 'rgba(255, 255, 255, 0.9)');
             map.current?.setPaintProperty(layer.id, 'text-halo-width', 2);
             map.current?.setLayoutProperty(layer.id, 'text-size', [
               'interpolate',
@@ -263,20 +263,20 @@ export default function NDFDRecordsMapClient() {
           source: 'states',
           paint: {
             'fill-color': 'rgba(0, 0, 0, 0)',
-            'fill-outline-color': 'rgba(255, 255, 255, 0.5)',
+            'fill-outline-color': 'rgba(107, 114, 128, 0.5)',
           },
         },
         firstSymbolId
       );
 
-      // State borders
+      // State borders - dark gray for light theme
       map.current.addLayer(
         {
           id: 'state-borders',
           type: 'line',
           source: 'states',
           paint: {
-            'line-color': 'rgba(255, 255, 255, 0.6)',
+            'line-color': 'rgba(75, 85, 99, 0.7)',
             'line-width': 1.5,
           },
         },
