@@ -163,11 +163,11 @@ export default function HomePage() {
             </div>
           </>
         ) : activeTab === 'records' ? (
-          /* Temperature Records Tab */
-          <div className="space-y-4">
-            <div className="bg-mv-bg-secondary rounded-xl border border-white/5 p-4">
-              <h2 className="text-xl font-bold text-mv-text-primary">Temperature Records Tracker</h2>
-              <p className="text-sm text-mv-text-muted mt-1">
+          /* Temperature Records Tab - Light Theme */
+          <div className="space-y-4 bg-gray-50 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-6 rounded-lg">
+            <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+              <h2 className="text-xl font-bold text-gray-900">Temperature Records Tracker</h2>
+              <p className="text-sm text-gray-600 mt-1">
                 NDFD forecast temperatures compared to historical records from WPC
               </p>
             </div>

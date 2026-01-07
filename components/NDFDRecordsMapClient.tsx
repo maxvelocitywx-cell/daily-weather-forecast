@@ -753,27 +753,27 @@ export default function NDFDRecordsMapClient() {
   return (
     <div className="space-y-4">
       {/* Controls */}
-      <div className="bg-mv-bg-secondary rounded-xl border border-white/5 p-4">
+      <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
         <div className="flex flex-wrap gap-4 items-start justify-between">
           {/* Record Type Selector */}
           <div>
-            <label className="block text-xs text-mv-text-muted uppercase tracking-wide mb-2">Record Type</label>
+            <label className="block text-xs text-gray-500 uppercase tracking-wide mb-2 font-semibold">Record Type</label>
             <div className="flex flex-wrap gap-2">
               {(Object.entries(recordTypes) as [RecordType, (typeof recordTypes)[RecordType]][]).map(
                 ([key, config]) => (
                   <button
                     key={key}
                     onClick={() => setSelectedType(key)}
-                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                      selectedType === key ? 'ring-2 ring-white/50 shadow-lg' : 'opacity-60 hover:opacity-100'
+                    className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${
+                      selectedType === key ? 'ring-2 ring-gray-400 shadow-md' : 'opacity-70 hover:opacity-100'
                     }`}
                     style={{
-                      backgroundColor: selectedType === key ? config.color : `${config.color}33`,
+                      backgroundColor: selectedType === key ? config.color : `${config.color}20`,
                       color: selectedType === key ? '#fff' : config.color,
                     }}
                   >
                     {config.label}
-                    <span className="ml-2 px-1.5 py-0.5 bg-black/30 rounded text-xs">
+                    <span className="ml-2 px-1.5 py-0.5 bg-black/20 rounded text-xs">
                       {totalCounts[`d${selectedDay}`]?.[key] || 0}
                     </span>
                   </button>
@@ -785,21 +785,21 @@ export default function NDFDRecordsMapClient() {
             <div className="flex gap-4 mt-3 text-sm">
               <div className="flex items-center gap-2">
                 <span className="w-3 h-3 rounded-full" style={{ backgroundColor: recordTypes[selectedType].breakColor }} />
-                <span className="text-mv-text-muted">Breaking:</span>
+                <span className="text-gray-600 font-medium">Breaking:</span>
                 <span className="font-bold" style={{ color: recordTypes[selectedType].breakColor }}>
                   {recordStatusCounts.breaking}
                 </span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="w-3 h-3 rounded-full" style={{ backgroundColor: recordTypes[selectedType].tieColor }} />
-                <span className="text-mv-text-muted">Tied:</span>
+                <span className="text-gray-600 font-medium">Tied:</span>
                 <span className="font-bold" style={{ color: recordTypes[selectedType].tieColor }}>
                   {recordStatusCounts.tied}
                 </span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="w-3 h-3 rounded-full" style={{ backgroundColor: recordTypes[selectedType].nearColor }} />
-                <span className="text-mv-text-muted">Near:</span>
+                <span className="text-gray-600 font-medium">Near:</span>
                 <span className="font-bold" style={{ color: recordTypes[selectedType].nearColor }}>
                   {recordStatusCounts.near}
                 </span>
@@ -809,7 +809,7 @@ export default function NDFDRecordsMapClient() {
 
           {/* Day Selector */}
           <div>
-            <label className="block text-xs text-mv-text-muted uppercase tracking-wide mb-2">Forecast Day</label>
+            <label className="block text-xs text-gray-500 uppercase tracking-wide mb-2 font-semibold">Forecast Day</label>
             <div className="flex gap-1">
               {[1, 2, 3, 4, 5, 6, 7].map((day) => {
                 const total = getDayTotal(day);
@@ -819,8 +819,8 @@ export default function NDFDRecordsMapClient() {
                     onClick={() => setSelectedDay(day)}
                     className={`min-w-[48px] h-10 rounded-lg font-bold text-sm transition-all flex flex-col items-center justify-center ${
                       selectedDay === day
-                        ? 'bg-mv-accent-blue text-white ring-2 ring-white/30'
-                        : 'bg-mv-bg-tertiary text-mv-text-muted hover:bg-mv-bg-tertiary/70'
+                        ? 'bg-blue-600 text-white ring-2 ring-blue-300 shadow-md'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
                     }`}
                   >
                     <span>D{day}</span>
@@ -833,25 +833,25 @@ export default function NDFDRecordsMapClient() {
 
           {/* Forecast Date */}
           <div className="text-right">
-            <label className="block text-xs text-mv-text-muted uppercase tracking-wide mb-2">Forecast Date</label>
-            <div className="text-mv-accent-blue font-semibold">{getForecastDate(selectedDay)}</div>
+            <label className="block text-xs text-gray-500 uppercase tracking-wide mb-2 font-semibold">Forecast Date</label>
+            <div className="text-blue-600 font-bold text-lg">{getForecastDate(selectedDay)}</div>
             {lastUpdated && (
-              <div className="text-xs text-mv-text-muted mt-1">Updated: {new Date(lastUpdated).toLocaleTimeString()}</div>
+              <div className="text-xs text-gray-500 mt-1">Updated: {new Date(lastUpdated).toLocaleTimeString()}</div>
             )}
           </div>
         </div>
       </div>
 
       {/* Map */}
-      <div className="relative bg-mv-bg-secondary rounded-xl border border-white/5 overflow-hidden" style={{ height: '75vh', minHeight: '600px' }}>
+      <div className="relative bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm" style={{ height: '75vh', minHeight: '600px' }}>
         <div ref={mapContainer} className="w-full h-full" />
 
         {/* Loading Overlay */}
         {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
+          <div className="absolute inset-0 flex items-center justify-center bg-white/90 z-10">
             <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-4 border-white border-t-transparent mx-auto mb-4" />
-              <div className="text-lg text-white">Loading NDFD records...</div>
+              <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent mx-auto mb-4" />
+              <div className="text-lg text-gray-700 font-semibold">Loading NDFD records...</div>
             </div>
           </div>
         )}
@@ -894,52 +894,52 @@ export default function NDFDRecordsMapClient() {
         {/* Station Detail Modal */}
         {selectedStation && (
           <div
-            className="absolute inset-0 flex items-center justify-center z-30 bg-black/70"
+            className="absolute inset-0 flex items-center justify-center z-30 bg-black/50"
             onClick={() => setSelectedStation(null)}
           >
             <div
-              className="bg-mv-bg-secondary rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl border-2"
+              className="bg-white rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl border-2"
               style={{ borderColor: recordTypes[selectedType].color }}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex justify-between items-start mb-4">
                 <div>
-                  <h3 className="text-xl font-bold text-white">{selectedStation.city}</h3>
-                  <p className="text-mv-text-muted text-sm">
+                  <h3 className="text-xl font-bold text-gray-900">{selectedStation.city}</h3>
+                  <p className="text-gray-500 text-sm">
                     {selectedStation.state} - Station: {selectedStation.id}
                   </p>
                 </div>
                 <button
                   onClick={() => setSelectedStation(null)}
-                  className="text-mv-text-muted hover:text-white text-2xl leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10"
+                  className="text-gray-400 hover:text-gray-700 text-2xl leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100"
                 >
                   ×
                 </button>
               </div>
 
               <div className="space-y-3">
-                <div className="flex justify-between items-center bg-black/30 rounded-lg p-3">
-                  <span className="text-mv-text-muted">Forecast Temp</span>
+                <div className="flex justify-between items-center bg-gray-50 rounded-lg p-3 border border-gray-200">
+                  <span className="text-gray-600 font-medium">Forecast Temp</span>
                   <span className="text-2xl font-bold" style={{ color: recordTypes[selectedType].color }}>
                     {selectedStation.fcstTemp}°F
                   </span>
                 </div>
 
-                <div className="flex justify-between items-center bg-black/30 rounded-lg p-3">
-                  <span className="text-mv-text-muted">Current Record</span>
-                  <span className="text-xl font-semibold text-white">{selectedStation.recordTemp}°F</span>
+                <div className="flex justify-between items-center bg-gray-50 rounded-lg p-3 border border-gray-200">
+                  <span className="text-gray-600 font-medium">Current Record</span>
+                  <span className="text-xl font-bold text-gray-900">{selectedStation.recordTemp}°F</span>
                 </div>
 
-                <div className="flex justify-between items-center bg-black/30 rounded-lg p-3">
-                  <span className="text-mv-text-muted">Record Year</span>
-                  <span className="text-lg text-white">{selectedStation.recordYear}</span>
+                <div className="flex justify-between items-center bg-gray-50 rounded-lg p-3 border border-gray-200">
+                  <span className="text-gray-600 font-medium">Record Year</span>
+                  <span className="text-lg font-bold text-gray-900">{selectedStation.recordYear}</span>
                 </div>
 
                 <div className="rounded-lg p-3 text-center" style={{ backgroundColor: recordTypes[selectedType].color }}>
                   <span className="text-xl font-bold text-white uppercase">
                     {selectedStation.diff > 0 ? 'BREAKING RECORD!' : selectedStation.diff === 0 ? 'TYING RECORD!' : 'NEAR RECORD'}
                   </span>
-                  <p className="text-sm text-white/80 mt-1">
+                  <p className="text-sm text-white/90 mt-1">
                     {Math.abs(selectedStation.diff)}°F{' '}
                     {selectedStation.diff > 0 ? 'above' : selectedStation.diff < 0 ? 'below' : 'at'} record
                   </p>
@@ -950,35 +950,35 @@ export default function NDFDRecordsMapClient() {
         )}
 
         {/* Temperature Legend */}
-        <div className="absolute bottom-4 left-4 right-4 bg-black/80 rounded-lg p-3 z-10">
-          <p className="text-xs text-gray-300 mb-2 font-semibold">Temperature (°F)</p>
+        <div className="absolute bottom-4 left-4 right-4 bg-white/95 rounded-lg p-3 z-10 shadow-lg border border-gray-200">
+          <p className="text-xs text-gray-700 mb-2 font-semibold">Temperature (°F)</p>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-white font-bold">-40°</span>
+            <span className="text-xs text-gray-800 font-bold">-40°</span>
             <div
-              className="flex-1 h-4 rounded"
+              className="flex-1 h-4 rounded border border-gray-300"
               style={{
                 background:
                   'linear-gradient(to right, #9400d3, #4b0082, #0000cd, #0066ff, #00bfff, #00ced1, #2e8b57, #9acd32, #ffff00, #ffa500, #ff4500, #dc143c, #ffb6c1, #ffffff)',
               }}
             />
-            <span className="text-xs text-white font-bold">110°</span>
+            <span className="text-xs text-gray-800 font-bold">110°</span>
           </div>
         </div>
       </div>
 
       {/* Summary Table */}
-      <div className="bg-mv-bg-secondary rounded-xl border border-white/5 p-4">
-        <h3 className="text-lg font-semibold text-mv-text-primary mb-4">Records Summary</h3>
+      <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+        <h3 className="text-lg font-bold text-gray-900 mb-4">Records Summary</h3>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-white/10">
-                <th className="text-left py-2 px-3 text-mv-text-muted font-medium">Type</th>
+              <tr className="border-b-2 border-gray-200">
+                <th className="text-left py-3 px-3 text-gray-600 font-semibold">Type</th>
                 {[1, 2, 3, 4, 5, 6, 7].map((d) => (
                   <th
                     key={d}
-                    className={`py-2 px-3 text-center ${
-                      selectedDay === d ? 'bg-mv-accent-blue/20 text-mv-accent-blue' : 'text-mv-text-muted'
+                    className={`py-3 px-3 text-center font-semibold ${
+                      selectedDay === d ? 'bg-blue-50 text-blue-700' : 'text-gray-600'
                     }`}
                   >
                     Day {d}
@@ -988,8 +988,8 @@ export default function NDFDRecordsMapClient() {
             </thead>
             <tbody>
               {(Object.entries(recordTypes) as [RecordType, (typeof recordTypes)[RecordType]][]).map(([key, config]) => (
-                <tr key={key} className="border-b border-white/5">
-                  <td className="py-2 px-3 font-medium" style={{ color: config.color }}>
+                <tr key={key} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="py-3 px-3 font-semibold" style={{ color: config.color }}>
                     {config.label}
                   </td>
                   {[1, 2, 3, 4, 5, 6, 7].map((d) => {
@@ -997,10 +997,10 @@ export default function NDFDRecordsMapClient() {
                     return (
                       <td
                         key={d}
-                        className={`py-2 px-3 text-center ${selectedDay === d ? 'bg-mv-accent-blue/20' : ''}`}
+                        className={`py-3 px-3 text-center ${selectedDay === d ? 'bg-blue-50' : ''}`}
                         style={{
-                          color: count > 0 ? config.color : '#444',
-                          fontWeight: count > 0 ? 600 : 400,
+                          color: count > 0 ? config.color : '#9ca3af',
+                          fontWeight: count > 0 ? 700 : 400,
                         }}
                       >
                         {count > 0 ? count : '—'}
@@ -1009,17 +1009,16 @@ export default function NDFDRecordsMapClient() {
                   })}
                 </tr>
               ))}
-              <tr className="border-t-2 border-mv-accent-blue/50">
-                <td className="py-2 px-3 font-bold text-white">TOTAL</td>
+              <tr className="border-t-2 border-blue-200 bg-blue-50/50">
+                <td className="py-3 px-3 font-bold text-gray-900">TOTAL</td>
                 {[1, 2, 3, 4, 5, 6, 7].map((d) => {
                   const total = getDayTotal(d);
                   return (
                     <td
                       key={d}
-                      className={`py-2 px-3 text-center font-bold ${
-                        selectedDay === d ? 'bg-mv-accent-blue/20 text-mv-accent-blue' : ''
+                      className={`py-3 px-3 text-center font-bold ${
+                        selectedDay === d ? 'bg-blue-100 text-blue-700' : 'text-blue-600'
                       }`}
-                      style={{ color: total > 0 && selectedDay !== d ? '#4a9eff' : undefined }}
                     >
                       {total > 0 ? total : '—'}
                     </td>
@@ -1032,13 +1031,13 @@ export default function NDFDRecordsMapClient() {
       </div>
 
       {/* Data Source */}
-      <div className="text-xs text-mv-text-muted text-center">
+      <div className="text-sm text-gray-600 text-center py-2">
         Source: NOAA/NWS Weather Prediction Center NDFD Records Display • Temperature data from GFS via NOMADS •{' '}
         <a
           href="https://www.wpc.ncep.noaa.gov/exper/ndfd/ndfd.html"
           target="_blank"
           rel="noopener noreferrer"
-          className="text-mv-accent-blue hover:underline"
+          className="text-blue-600 hover:underline font-medium"
         >
           View Official WPC Data
         </a>
