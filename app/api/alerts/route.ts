@@ -11,6 +11,15 @@ export const revalidate = 30; // Cache for 30 seconds
 // NWS API User-Agent (required)
 const USER_AGENT = 'maxvelocitywx.com (contact@maxvelocitywx.com)';
 
+// In-memory cache for zone geometries (persists across requests in same serverless instance)
+const zoneGeometryCache = new Map<string, { geometry: GeoJSONGeometry | null; timestamp: number }>();
+const ZONE_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours - zone boundaries rarely change
+
+interface GeoJSONGeometry {
+  type: string;
+  coordinates: number[][][] | number[][][][];
+}
+
 // Severity base scores (higher = more severe)
 const SEVERITY_BASE: Record<string, number> = {
   Extreme: 100,
@@ -81,6 +90,86 @@ const EVENT_BOOST: Record<string, number> = {
 
 // Keywords that indicate considerable/catastrophic impact
 const IMPACT_KEYWORDS = ['considerable', 'catastrophic', 'life-threatening', 'extremely dangerous', 'particularly dangerous'];
+
+/**
+ * Fetch zone geometry from NWS API with caching
+ */
+async function fetchZoneGeometry(zoneUrl: string): Promise<GeoJSONGeometry | null> {
+  // Check cache first
+  const cached = zoneGeometryCache.get(zoneUrl);
+  if (cached && Date.now() - cached.timestamp < ZONE_CACHE_TTL) {
+    return cached.geometry;
+  }
+
+  try {
+    const response = await fetch(zoneUrl, {
+      headers: {
+        Accept: 'application/geo+json',
+        'User-Agent': USER_AGENT
+      }
+    });
+
+    if (!response.ok) {
+      zoneGeometryCache.set(zoneUrl, { geometry: null, timestamp: Date.now() });
+      return null;
+    }
+
+    const data = await response.json();
+    const geometry = data.geometry || null;
+
+    // Cache the result
+    zoneGeometryCache.set(zoneUrl, { geometry, timestamp: Date.now() });
+    return geometry;
+  } catch {
+    zoneGeometryCache.set(zoneUrl, { geometry: null, timestamp: Date.now() });
+    return null;
+  }
+}
+
+/**
+ * Merge multiple geometries into a single MultiPolygon
+ */
+function mergeGeometries(geometries: GeoJSONGeometry[]): GeoJSONGeometry | null {
+  if (geometries.length === 0) return null;
+  if (geometries.length === 1) return geometries[0];
+
+  // Collect all polygon rings for MultiPolygon format: number[][][][]
+  const allPolygonRings: number[][][][] = [];
+
+  for (const geom of geometries) {
+    if (geom.type === 'Polygon') {
+      // Polygon coordinates are number[][][], wrap in array for MultiPolygon
+      allPolygonRings.push(geom.coordinates as number[][][]);
+    } else if (geom.type === 'MultiPolygon') {
+      // MultiPolygon coordinates are number[][][][]
+      const coords = geom.coordinates as number[][][][];
+      allPolygonRings.push(...coords);
+    }
+  }
+
+  if (allPolygonRings.length === 0) return null;
+  if (allPolygonRings.length === 1) {
+    return { type: 'Polygon', coordinates: allPolygonRings[0] };
+  }
+
+  return { type: 'MultiPolygon', coordinates: allPolygonRings };
+}
+
+/**
+ * Fetch geometries for all affected zones of an alert
+ */
+async function fetchAlertZoneGeometries(affectedZones: string[]): Promise<GeoJSONGeometry | null> {
+  if (!affectedZones || affectedZones.length === 0) return null;
+
+  // Limit to first 10 zones to avoid too many requests
+  const zonesToFetch = affectedZones.slice(0, 10);
+
+  const geometryPromises = zonesToFetch.map(zoneUrl => fetchZoneGeometry(zoneUrl));
+  const geometries = await Promise.all(geometryPromises);
+
+  const validGeometries = geometries.filter((g): g is GeoJSONGeometry => g !== null);
+  return mergeGeometries(validGeometries);
+}
 
 interface NWSAlert {
   id: string;
@@ -266,8 +355,12 @@ export async function GET() {
     const data = await response.json();
     const features = data.features as NWSAlert[];
 
-    // Process and score each alert
-    const processedAlerts: ProcessedAlert[] = [];
+    // First pass: Process and score each alert, track those needing zone geometry
+    interface AlertWithZones {
+      processed: ProcessedAlert;
+      affectedZones?: string[];
+    }
+    const alertsWithZones: AlertWithZones[] = [];
     const seenKeys = new Set<string>();
 
     for (const alert of features) {
@@ -299,32 +392,55 @@ export async function GET() {
       // Calculate ranking score
       const score = calculateScore(alert, populationData.total);
 
-      processedAlerts.push({
-        id: props.id,
-        event: props.event,
-        severity: props.severity,
-        urgency: props.urgency,
-        certainty: props.certainty,
-        headline: props.headline || null,
-        description: props.description || null,
-        instruction: props.instruction || null,
-        effective: props.effective,
-        expires: props.expires,
-        ends: props.ends || null,
-        onset: props.onset || null,
-        areaDesc: props.areaDesc,
-        states,
-        population: populationData,
-        score,
-        hasGeometry: !!alert.geometry,
-        geometry: alert.geometry || null,
-        sender: props.senderName,
-        messageType: props.messageType
+      alertsWithZones.push({
+        processed: {
+          id: props.id,
+          event: props.event,
+          severity: props.severity,
+          urgency: props.urgency,
+          certainty: props.certainty,
+          headline: props.headline || null,
+          description: props.description || null,
+          instruction: props.instruction || null,
+          effective: props.effective,
+          expires: props.expires,
+          ends: props.ends || null,
+          onset: props.onset || null,
+          areaDesc: props.areaDesc,
+          states,
+          population: populationData,
+          score,
+          hasGeometry: !!alert.geometry,
+          geometry: alert.geometry || null,
+          sender: props.senderName,
+          messageType: props.messageType
+        },
+        affectedZones: !alert.geometry ? props.affectedZones : undefined
       });
     }
 
     // Sort by score descending with stable tie-breakers
-    processedAlerts.sort(compareAlerts);
+    alertsWithZones.sort((a, b) => compareAlerts(a.processed, b.processed));
+
+    // Second pass: Fetch zone geometries for alerts without embedded geometry
+    // Limit to top 50 to keep response times reasonable
+    const alertsNeedingGeometry = alertsWithZones
+      .slice(0, 50)
+      .filter(a => !a.processed.hasGeometry && a.affectedZones && a.affectedZones.length > 0);
+
+    // Fetch zone geometries in parallel (batched)
+    const geometryPromises = alertsNeedingGeometry.map(async (alertWithZones) => {
+      const geometry = await fetchAlertZoneGeometries(alertWithZones.affectedZones!);
+      if (geometry) {
+        alertWithZones.processed.geometry = geometry;
+        alertWithZones.processed.hasGeometry = true;
+      }
+    });
+
+    await Promise.all(geometryPromises);
+
+    // Extract processed alerts
+    const processedAlerts = alertsWithZones.map(a => a.processed);
 
     // Split into top 5 and rest
     const top5Alerts = processedAlerts.slice(0, 5);
