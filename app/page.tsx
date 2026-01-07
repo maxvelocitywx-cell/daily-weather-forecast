@@ -11,12 +11,13 @@ import { WeatherMap, MapPlaceholder } from '@/components/WeatherMap';
 import { RegionList } from '@/components/RegionList';
 import { National7DayTable } from '@/components/National7DayTable';
 import { NDFDRecordsMap } from '@/components/NDFDRecordsMap';
+import WeatherAlerts from '@/components/WeatherAlerts';
 
-type TabId = 'forecast' | 'records';
+type TabId = 'alerts' | 'forecast' | 'records';
 
 export default function HomePage() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<TabId>('forecast');
+  const [activeTab, setActiveTab] = useState<TabId>('alerts');
   const [selectedDay, setSelectedDay] = useState(1);
   const [selectedRegion, setSelectedRegion] = useState<RegionId | null>(null);
 
@@ -52,6 +53,20 @@ export default function HomePage() {
       <div className="max-w-7xl mx-auto px-4 pt-4">
         <div className="flex gap-2 bg-mv-bg-secondary rounded-lg p-1 w-fit">
           <button
+            onClick={() => setActiveTab('alerts')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+              activeTab === 'alerts'
+                ? 'bg-red-500 text-white shadow-md'
+                : 'text-mv-text-muted hover:text-mv-text-primary hover:bg-white/5'
+            }`}
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+            </span>
+            Active Alerts
+          </button>
+          <button
             onClick={() => setActiveTab('forecast')}
             className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
               activeTab === 'forecast'
@@ -75,7 +90,9 @@ export default function HomePage() {
       </div>
 
       <main className="flex-1 max-w-7xl mx-auto px-4 py-6 w-full">
-        {activeTab === 'forecast' ? (
+        {activeTab === 'alerts' ? (
+          <WeatherAlerts />
+        ) : activeTab === 'forecast' ? (
           <>
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Left column - National Summary and Map */}
