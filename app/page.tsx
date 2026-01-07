@@ -12,8 +12,9 @@ import { RegionList } from '@/components/RegionList';
 import { National7DayTable } from '@/components/National7DayTable';
 import { NDFDRecordsMap } from '@/components/NDFDRecordsMap';
 import WeatherAlerts from '@/components/WeatherAlerts';
+import { SoundingsTab } from '@/components/soundings/SoundingsTab';
 
-type TabId = 'alerts' | 'forecast' | 'records';
+type TabId = 'alerts' | 'forecast' | 'records' | 'soundings';
 
 export default function HomePage() {
   const router = useRouter();
@@ -86,6 +87,16 @@ export default function HomePage() {
           >
             Temperature Records
           </button>
+          <button
+            onClick={() => setActiveTab('soundings')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              activeTab === 'soundings'
+                ? 'bg-mv-accent-purple text-white shadow-md'
+                : 'text-mv-text-muted hover:text-mv-text-primary hover:bg-white/5'
+            }`}
+          >
+            Soundings
+          </button>
         </div>
       </div>
 
@@ -151,7 +162,7 @@ export default function HomePage() {
               <National7DayTable />
             </div>
           </>
-        ) : (
+        ) : activeTab === 'records' ? (
           /* Temperature Records Tab */
           <div className="space-y-4">
             <div className="bg-mv-bg-secondary rounded-xl border border-white/5 p-4">
@@ -162,6 +173,9 @@ export default function HomePage() {
             </div>
             <NDFDRecordsMap />
           </div>
+        ) : (
+          /* Soundings Tab */
+          <SoundingsTab />
         )}
       </main>
 
