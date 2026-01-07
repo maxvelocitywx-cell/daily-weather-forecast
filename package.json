@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@types/mapbox-gl": "^3.4.1",
+    "@types/react-window": "^1.8.8",
     "@vercel/kv": "^3.0.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
@@ -21,6 +22,7 @@
     "openai": "^6.15.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "react-window": "^2.2.4",
     "recharts": "^3.6.0",
     "swr": "^2.2.5"
   },

@@ -11,64 +11,76 @@ export const revalidate = 30; // Cache for 30 seconds
 // NWS API User-Agent (required)
 const USER_AGENT = 'maxvelocitywx.com (contact@maxvelocitywx.com)';
 
-// Severity ranking (higher = more severe)
-const SEVERITY_SCORE: Record<string, number> = {
-  Extreme: 5,
-  Severe: 4,
-  Moderate: 3,
-  Minor: 2,
-  Unknown: 1
+// Severity base scores (higher = more severe)
+const SEVERITY_BASE: Record<string, number> = {
+  Extreme: 100,
+  Severe: 75,
+  Moderate: 50,
+  Minor: 25,
+  Unknown: 10
 };
 
 // Urgency ranking
 const URGENCY_SCORE: Record<string, number> = {
-  Immediate: 5,
-  Expected: 4,
-  Future: 3,
-  Past: 2,
-  Unknown: 1
+  Immediate: 20,
+  Expected: 15,
+  Future: 10,
+  Past: 5,
+  Unknown: 0
 };
 
 // Certainty ranking
 const CERTAINTY_SCORE: Record<string, number> = {
-  Observed: 5,
-  Likely: 4,
-  Possible: 3,
-  Unlikely: 2,
-  Unknown: 1
+  Observed: 15,
+  Likely: 12,
+  Possible: 8,
+  Unlikely: 4,
+  Unknown: 0
 };
 
-// Event type boost (critical warnings get extra points)
+// Event type boost - critical warnings get extra points
 const EVENT_BOOST: Record<string, number> = {
-  'Tornado Warning': 50,
-  'Tornado Emergency': 60,
-  'Particularly Dangerous Situation': 55,
-  'Flash Flood Warning': 40,
-  'Flash Flood Emergency': 50,
-  'Severe Thunderstorm Warning': 35,
-  'Hurricane Warning': 45,
-  'Hurricane Emergency': 55,
-  'Tsunami Warning': 50,
-  'Extreme Wind Warning': 45,
-  'Storm Surge Warning': 40,
-  'Blizzard Warning': 30,
-  'Ice Storm Warning': 30,
-  'Winter Storm Warning': 25,
-  'High Wind Warning': 20,
-  'Flood Warning': 20,
-  'Red Flag Warning': 15,
-  'Fire Weather Watch': 10,
-  'Heat Advisory': 10,
-  'Excessive Heat Warning': 25,
-  'Wind Chill Warning': 20,
-  'Freeze Warning': 15,
-  'Frost Advisory': 5,
-  'Dense Fog Advisory': 5,
-  'Winter Weather Advisory': 10,
-  'Wind Advisory': 5,
-  'Coastal Flood Warning': 15,
-  'Coastal Flood Advisory': 5
+  // Tornado events (+30)
+  'Tornado Warning': 30,
+  'Tornado Emergency': 35,
+  'Tornado Watch': 15,
+  // Flash flood events (+30)
+  'Flash Flood Warning': 30,
+  'Flash Flood Emergency': 35,
+  'Flash Flood Watch': 15,
+  // Severe thunderstorm/blizzard/ice/hurricane (+15)
+  'Severe Thunderstorm Warning': 15,
+  'Severe Thunderstorm Watch': 10,
+  'Blizzard Warning': 15,
+  'Blizzard Watch': 10,
+  'Ice Storm Warning': 15,
+  'Hurricane Warning': 15,
+  'Hurricane Watch': 10,
+  'Hurricane Emergency': 20,
+  // Other high-impact events
+  'Tsunami Warning': 30,
+  'Extreme Wind Warning': 20,
+  'Storm Surge Warning': 20,
+  'Particularly Dangerous Situation': 25,
+  'Winter Storm Warning': 10,
+  'High Wind Warning': 8,
+  'Flood Warning': 8,
+  'Red Flag Warning': 8,
+  'Excessive Heat Warning': 10,
+  'Wind Chill Warning': 8,
+  'Fire Weather Watch': 5,
+  'Heat Advisory': 5,
+  'Freeze Warning': 5,
+  'Winter Weather Advisory': 5,
+  'Wind Advisory': 3,
+  'Coastal Flood Warning': 8,
+  'Frost Advisory': 2,
+  'Dense Fog Advisory': 2,
+  'Coastal Flood Advisory': 3
 };
+
+// Keywords that indicate considerable/catastrophic impact
+const IMPACT_KEYWORDS = ['considerable', 'catastrophic', 'life-threatening', 'extremely dangerous', 'particularly dangerous'];
 
 interface NWSAlert {
   id: string;
@@ -107,7 +119,7 @@ interface NWSAlert {
   };
 }
 
-interface ProcessedAlert {
+export interface ProcessedAlert {
   id: string;
   event: string;
   severity: string;
@@ -119,6 +131,7 @@ interface ProcessedAlert {
   effective: string;
   expires: string;
   ends: string | null;
+  onset: string | null;
   areaDesc: string;
   states: string[];
   population: {
@@ -131,25 +144,58 @@ interface ProcessedAlert {
   geometry: NWSAlert['geometry'] | null;
   sender: string;
   messageType: string;
+  // For formatted display
+  populationFormatted?: string;
 }
 
 /**
- * Calculate ranking score for an alert
+ * Calculate deterministic ranking score for an alert
+ * Higher score = more important alert
  */
 function calculateScore(alert: NWSAlert, population: number): number {
   const props = alert.properties;
+  const now = Date.now();
 
-  const severityScore = (SEVERITY_SCORE[props.severity] || 1) * 10;
-  const urgencyScore = (URGENCY_SCORE[props.urgency] || 1) * 8;
-  const certaintyScore = (CERTAINTY_SCORE[props.certainty] || 1) * 6;
+  // Base severity score (0-100)
+  let score = SEVERITY_BASE[props.severity] || 10;
 
-  // Population score (logarithmic to prevent huge populations from dominating)
-  const popScore = population > 0 ? Math.log10(population) * 5 : 0;
+  // Add urgency score (0-20)
+  score += URGENCY_SCORE[props.urgency] || 0;
 
-  // Event type boost
-  const eventBoost = EVENT_BOOST[props.event] || 0;
+  // Add certainty score (0-15)
+  score += CERTAINTY_SCORE[props.certainty] || 0;
 
-  return severityScore + urgencyScore + certaintyScore + popScore + eventBoost;
+  // Add event type boost (0-35)
+  score += EVENT_BOOST[props.event] || 0;
+
+  // Check for impact keywords in headline/description (+10)
+  const textToCheck = `${props.headline || ''} ${props.description || ''} ${props.event || ''}`.toLowerCase();
+  if (IMPACT_KEYWORDS.some(kw => textToCheck.includes(kw))) {
+    score += 10;
+  }
+
+  // Population score (0-20, logarithmic)
+  if (population > 0) {
+    // Log scale: 1K=3, 10K=4, 100K=5, 1M=6, 10M=7
+    const logPop = Math.log10(population);
+    score += Math.min(20, Math.max(0, (logPop - 3) * 5));
+  }
+
+  // Onset timing bonus (+10 if within 3 hours)
+  const onset = props.onset ? new Date(props.onset).getTime() : new Date(props.effective).getTime();
+  const hoursUntilOnset = (onset - now) / (1000 * 60 * 60);
+  if (hoursUntilOnset <= 3 && hoursUntilOnset >= -1) {
+    score += 10;
+  }
+
+  // Penalty for expiring soon (-5 if <30 min remaining)
+  const expires = new Date(props.expires).getTime();
+  const minutesRemaining = (expires - now) / (1000 * 60);
+  if (minutesRemaining < 30 && minutesRemaining > 0) {
+    score -= 5;
+  }
+
+  return Math.round(score * 100) / 100; // Round to 2 decimal places for stability
 }
 
 /**
@@ -173,6 +219,33 @@ function formatPopulation(pop: number): string {
     return (pop / 1_000).toFixed(1).replace(/\.?0+$/, '') + 'K';
   }
   return pop.toString();
+}
+
+/**
+ * Stable sort comparator for alerts
+ */
+function compareAlerts(a: ProcessedAlert, b: ProcessedAlert): number {
+  // Primary: score descending
+  if (b.score !== a.score) return b.score - a.score;
+
+  // Secondary: severity
+  const sevOrder = ['Extreme', 'Severe', 'Moderate', 'Minor', 'Unknown'];
+  const sevA = sevOrder.indexOf(a.severity);
+  const sevB = sevOrder.indexOf(b.severity);
+  if (sevA !== sevB) return sevA - sevB;
+
+  // Tertiary: onset sooner
+  const onsetA = a.onset ? new Date(a.onset).getTime() : new Date(a.effective).getTime();
+  const onsetB = b.onset ? new Date(b.onset).getTime() : new Date(b.effective).getTime();
+  if (onsetA !== onsetB) return onsetA - onsetB;
+
+  // Quaternary: expires later
+  const expA = new Date(a.expires).getTime();
+  const expB = new Date(b.expires).getTime();
+  if (expA !== expB) return expB - expA;
+
+  // Final: stable by ID
+  return a.id.localeCompare(b.id);
 }
 
 export async function GET() {
@@ -238,6 +311,7 @@ export async function GET() {
         effective: props.effective,
         expires: props.expires,
         ends: props.ends || null,
+        onset: props.onset || null,
         areaDesc: props.areaDesc,
         states,
         population: populationData,
@@ -249,28 +323,37 @@ export async function GET() {
       });
     }
 
-    // Sort by score descending and take top 5
-    processedAlerts.sort((a, b) => b.score - a.score);
-    const topAlerts = processedAlerts.slice(0, 5);
+    // Sort by score descending with stable tie-breakers
+    processedAlerts.sort(compareAlerts);
+
+    // Split into top 5 and rest
+    const top5Alerts = processedAlerts.slice(0, 5);
+    const otherAlerts = processedAlerts.slice(5);
 
     // Format response
+    const formatAlert = (alert: ProcessedAlert) => ({
+      ...alert,
+      populationFormatted: formatPopulation(alert.population.total),
+      population: {
+        ...alert.population,
+        totalFormatted: formatPopulation(alert.population.total),
+        byStateFormatted: Object.fromEntries(
+          Object.entries(alert.population.byState).map(([state, pop]) => [
+            state,
+            formatPopulation(pop)
+          ])
+        )
+      }
+    });
+
     const responseData = {
       updated: new Date().toISOString(),
-      totalActive: features.length,
-      alerts: topAlerts.map(alert => ({
-        ...alert,
-        populationFormatted: formatPopulation(alert.population.total),
-        population: {
-          ...alert.population,
-          totalFormatted: formatPopulation(alert.population.total),
-          byStateFormatted: Object.fromEntries(
-            Object.entries(alert.population.byState).map(([state, pop]) => [
-              state,
-              formatPopulation(pop)
-            ])
-          )
-        }
-      }))
+      totalActive: processedAlerts.length,
+      totalRaw: features.length,
+      top5: top5Alerts.map(formatAlert),
+      other: otherAlerts.map(formatAlert),
+      // Also include combined for backwards compatibility
+      alerts: top5Alerts.map(formatAlert)
     };
 
     return NextResponse.json(responseData, {
