@@ -213,6 +213,7 @@ export interface Headline {
   headline: string;         // max 90 chars
   topic: HeadlineTopic;
   confidence_label: ConfidenceLabel;
+  regions: string[];        // Array of affected regions/states
   location: {
     state: string;
     place: string;
@@ -263,6 +264,12 @@ export const HeadlinesSchema = {
             enum: ['Measured', 'Reported', 'High', 'Medium', 'Low'],
             description: 'Measured=station obs with station_id ONLY, Reported=LSR, High/Medium/Low=alerts/outlooks',
           },
+          regions: {
+            type: 'array',
+            items: { type: 'string' },
+            minItems: 1,
+            description: 'Array of affected regions/states (e.g., ["Texas", "Oklahoma"] or ["Central Plains", "Gulf Coast"])',
+          },
           location: {
             type: 'object',
             properties: {
@@ -291,7 +298,7 @@ export const HeadlinesSchema = {
             description: 'Array of fact IDs from the bundle that back this headline. REQUIRED - must exist in bundle.',
           },
         },
-        required: ['id', 'headline', 'topic', 'confidence_label', 'location', 'timestamp_utc', 'source_name', 'source_url', 'fact_ids'],
+        required: ['id', 'headline', 'topic', 'confidence_label', 'regions', 'location', 'timestamp_utc', 'source_name', 'source_url', 'fact_ids'],
         additionalProperties: false,
       },
       minItems: 10,

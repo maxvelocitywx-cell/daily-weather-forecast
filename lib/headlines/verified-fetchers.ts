@@ -828,6 +828,257 @@ export async function fetchEROFacts(): Promise<VerifiedFact[]> {
 }
 
 // ============================================================================
+// WPC WINTER WEATHER FETCHER
+// ============================================================================
+
+/**
+ * Fetch WPC Winter Weather products via NWS alerts
+ * WPC doesn't have a direct winter geojson, so we use NWS winter alerts
+ */
+export async function fetchWinterFacts(): Promise<VerifiedFact[]> {
+  const cacheKey = 'verified-winter';
+  const cached = getCached<VerifiedFact[]>(cacheKey);
+  if (cached) return cached;
+
+  const facts: VerifiedFact[] = [];
+
+  try {
+    // Fetch winter-related alerts from NWS
+    const response = await fetch('https://api.weather.gov/alerts/active?event=Winter%20Storm%20Warning,Winter%20Storm%20Watch,Blizzard%20Warning,Ice%20Storm%20Warning,Winter%20Weather%20Advisory,Wind%20Chill%20Warning,Wind%20Chill%20Advisory,Heavy%20Snow%20Warning', {
+      headers: {
+        Accept: 'application/geo+json',
+        'User-Agent': USER_AGENT,
+      },
+    });
+
+    if (!response.ok) {
+      console.log('[Verified Fetcher] No winter alerts found');
+      return facts;
+    }
+
+    const data = await response.json();
+    const features: NWSAlertFeature[] = data.features || [];
+
+    for (const feature of features) {
+      const props = feature.properties;
+      if (!props || props.status === 'Cancel') continue;
+
+      // Extract state
+      let state = '';
+      let stateAbbrev = '';
+      const sameCodes = props.geocode?.SAME || [];
+
+      for (const code of sameCodes) {
+        if (typeof code === 'string' && code.length >= 5) {
+          const fipsCode = code.substring(0, 2);
+          const stateName = FIPS_TO_STATE[fipsCode];
+          if (stateName) {
+            state = stateName;
+            stateAbbrev = STATE_ABBREVS[stateName] || '';
+            break;
+          }
+        }
+      }
+
+      if (!state) continue;
+
+      const areaDescParts = props.areaDesc.split(';').map(p => p.trim());
+      const place = areaDescParts[0] || 'Multiple areas';
+
+      const fact: VerifiedFact = {
+        id: generateFactId('nws_alert', `winter-${props.id.split('/').pop()}`),
+        source: 'nws_alert',
+        source_name: props.senderName || 'NWS',
+        source_url: props.id,
+        confidence: props.urgency === 'Immediate' ? 'High' : 'Medium',
+        event_type: props.event,
+        location: {
+          state,
+          state_abbrev: stateAbbrev,
+          place,
+        },
+        timestamp_utc: props.onset || new Date().toISOString(),
+        alert_id: props.id,
+        sender_name: props.senderName,
+        area_desc: props.areaDesc,
+        raw_excerpt: props.headline || undefined,
+      };
+
+      const validation = validateFact(fact);
+      if (validation.valid) {
+        facts.push(fact);
+      }
+    }
+
+    console.log(`[Verified Fetcher] Winter: ${facts.length} alerts`);
+  } catch (error) {
+    console.error('[Verified Fetcher] Error fetching winter alerts:', error);
+  }
+
+  setCache(cacheKey, facts);
+  return facts;
+}
+
+// ============================================================================
+// NHC TROPICAL FETCHER
+// ============================================================================
+
+interface NHCStorm {
+  id: string;
+  binNumber: string;
+  name: string;
+  classification: string;
+  intensity: number;
+  pressure: number;
+  latitude: number;
+  longitude: number;
+  movement?: {
+    direction: string;
+    speed: number;
+  };
+  lastUpdate: string;
+  publicAdvisory?: {
+    url: string;
+  };
+}
+
+interface NHCActiveStorms {
+  activeStorms: NHCStorm[];
+}
+
+/**
+ * Fetch NHC Tropical Weather Outlook and active storms
+ */
+export async function fetchNHCFacts(): Promise<VerifiedFact[]> {
+  const cacheKey = 'verified-nhc';
+  const cached = getCached<VerifiedFact[]>(cacheKey);
+  if (cached) return cached;
+
+  const facts: VerifiedFact[] = [];
+
+  try {
+    // Try to fetch active storms from NHC
+    const response = await fetch('https://www.nhc.noaa.gov/CurrentStorms.json', {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+      },
+    });
+
+    if (response.ok) {
+      const data: NHCActiveStorms = await response.json();
+      const storms = data.activeStorms || [];
+
+      for (const storm of storms) {
+        // Only include Atlantic and Eastern Pacific storms affecting US
+        if (!['al', 'ep', 'cp'].includes(storm.binNumber?.substring(0, 2)?.toLowerCase() || '')) {
+          continue;
+        }
+
+        const movement = storm.movement
+          ? `Moving ${storm.movement.direction} at ${storm.movement.speed} mph`
+          : 'Movement unknown';
+
+        const fact: VerifiedFact = {
+          id: generateFactId('nhc_tropical', storm.id || storm.name),
+          source: 'nhc_tropical',
+          source_name: 'National Hurricane Center',
+          source_url: storm.publicAdvisory?.url || 'https://www.nhc.noaa.gov/',
+          confidence: 'High',
+          event_type: `${storm.classification} ${storm.name}`,
+          magnitude: storm.intensity,
+          units: 'kt',
+          location: {
+            state: 'Atlantic/Gulf',
+            state_abbrev: 'US',
+            place: `${storm.latitude.toFixed(1)}N ${Math.abs(storm.longitude).toFixed(1)}W`,
+            lat: storm.latitude,
+            lon: storm.longitude,
+          },
+          timestamp_utc: storm.lastUpdate || new Date().toISOString(),
+          raw_excerpt: `${storm.name}: ${storm.intensity} kt, ${storm.pressure} mb. ${movement}`,
+        };
+
+        const validation = validateFact(fact);
+        if (validation.valid) {
+          facts.push(fact);
+        }
+      }
+    }
+
+    // Also check for tropical-related NWS alerts
+    const alertResponse = await fetch('https://api.weather.gov/alerts/active?event=Hurricane%20Warning,Hurricane%20Watch,Tropical%20Storm%20Warning,Tropical%20Storm%20Watch,Storm%20Surge%20Warning,Storm%20Surge%20Watch', {
+      headers: {
+        Accept: 'application/geo+json',
+        'User-Agent': USER_AGENT,
+      },
+    });
+
+    if (alertResponse.ok) {
+      const alertData = await alertResponse.json();
+      const features: NWSAlertFeature[] = alertData.features || [];
+
+      for (const feature of features) {
+        const props = feature.properties;
+        if (!props || props.status === 'Cancel') continue;
+
+        let state = '';
+        let stateAbbrev = '';
+        const sameCodes = props.geocode?.SAME || [];
+
+        for (const code of sameCodes) {
+          if (typeof code === 'string' && code.length >= 5) {
+            const fipsCode = code.substring(0, 2);
+            const stateName = FIPS_TO_STATE[fipsCode];
+            if (stateName) {
+              state = stateName;
+              stateAbbrev = STATE_ABBREVS[stateName] || '';
+              break;
+            }
+          }
+        }
+
+        if (!state) continue;
+
+        const areaDescParts = props.areaDesc.split(';').map(p => p.trim());
+        const place = areaDescParts[0] || 'Coastal areas';
+
+        const fact: VerifiedFact = {
+          id: generateFactId('nhc_tropical', `alert-${props.id.split('/').pop()}`),
+          source: 'nhc_tropical',
+          source_name: props.senderName || 'NWS',
+          source_url: props.id,
+          confidence: 'High',
+          event_type: props.event,
+          location: {
+            state,
+            state_abbrev: stateAbbrev,
+            place,
+          },
+          timestamp_utc: props.onset || new Date().toISOString(),
+          alert_id: props.id,
+          sender_name: props.senderName,
+          area_desc: props.areaDesc,
+          raw_excerpt: props.headline || undefined,
+        };
+
+        const validation = validateFact(fact);
+        if (validation.valid) {
+          facts.push(fact);
+        }
+      }
+    }
+
+    console.log(`[Verified Fetcher] NHC/Tropical: ${facts.length} facts`);
+  } catch (error) {
+    console.error('[Verified Fetcher] Error fetching NHC data:', error);
+  }
+
+  setCache(cacheKey, facts);
+  return facts;
+}
+
+// ============================================================================
 // FACTS BUNDLE BUILDER
 // ============================================================================
 
@@ -840,16 +1091,21 @@ export async function buildVerifiedFactsBundle(): Promise<FactsBundle> {
   const startTime = Date.now();
 
   // Fetch all sources in parallel
-  const [alertFacts, lsrFacts, stationFacts, spcFacts, eroFacts] = await Promise.all([
+  const [alertFacts, lsrFacts, stationFacts, spcFacts, eroFacts, winterFacts, nhcFacts] = await Promise.all([
     fetchAlertFacts(),
     fetchSignificantLSRFacts(),
     fetchStationObsFacts(),
     fetchSPCFacts(),
     fetchEROFacts(),
+    fetchWinterFacts(),
+    fetchNHCFacts(),
   ]);
 
-  // Combine all facts
-  const allFacts = [...alertFacts, ...lsrFacts, ...stationFacts, ...spcFacts, ...eroFacts];
+  // Combine all facts (dedupe winter facts that may overlap with alerts)
+  const alertIds = new Set(alertFacts.map(f => f.alert_id).filter(Boolean));
+  const dedupedWinterFacts = winterFacts.filter(f => !alertIds.has(f.alert_id));
+
+  const allFacts = [...alertFacts, ...lsrFacts, ...stationFacts, ...spcFacts, ...eroFacts, ...dedupedWinterFacts, ...nhcFacts];
 
   // Create fact_ids Set for validation lookup
   const factIds = new Set(allFacts.map(f => f.id));
@@ -863,8 +1119,8 @@ export async function buildVerifiedFactsBundle(): Promise<FactsBundle> {
       lsr: lsrFacts.length,
       station_obs: stationFacts.length,
       spc: spcFacts.length,
-      wpc: eroFacts.length,
-      nhc: 0, // TODO: Add NHC tropical fetcher
+      wpc: eroFacts.length + dedupedWinterFacts.length,
+      nhc: nhcFacts.length,
     },
     validation: {
       total_fetched: allFacts.length,
@@ -881,6 +1137,8 @@ export async function buildVerifiedFactsBundle(): Promise<FactsBundle> {
   console.log(`  - Station Obs: ${stationFacts.length}`);
   console.log(`  - SPC: ${spcFacts.length}`);
   console.log(`  - ERO: ${eroFacts.length}`);
+  console.log(`  - Winter: ${dedupedWinterFacts.length}`);
+  console.log(`  - NHC: ${nhcFacts.length}`);
   console.log(`  - Total: ${allFacts.length}`);
 
   return bundle;

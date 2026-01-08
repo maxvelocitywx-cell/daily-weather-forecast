@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { RefreshCw, Clock, AlertTriangle, Zap } from 'lucide-react';
+import { RefreshCw, Clock, AlertTriangle, Zap, Database, CheckCircle2 } from 'lucide-react';
 import HeadlineCard from './HeadlineCard';
 import { HeadlinesRun } from '@/lib/headlines/types';
 
@@ -93,6 +93,30 @@ export default function HeadlinesList({ initialData }: HeadlinesListProps) {
     return formatTimestamp(timestamp);
   };
 
+  // Get unique regions from all headlines
+  const getUniqueRegions = () => {
+    if (!data?.headlines) return [];
+    const regions = new Set<string>();
+    for (const headline of data.headlines) {
+      if (headline.regions) {
+        for (const region of headline.regions) {
+          regions.add(region);
+        }
+      }
+    }
+    return Array.from(regions).slice(0, 8);
+  };
+
+  // Get topic distribution
+  const getTopicDistribution = () => {
+    if (!data?.headlines) return {};
+    const topics: Record<string, number> = {};
+    for (const headline of data.headlines) {
+      topics[headline.topic] = (topics[headline.topic] || 0) + 1;
+    }
+    return topics;
+  };
+
   if (loading && !data) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -129,9 +153,13 @@ export default function HeadlinesList({ initialData }: HeadlinesListProps) {
     );
   }
 
+  const uniqueRegions = getUniqueRegions();
+  const topicDist = getTopicDistribution();
+  const verifiedCount = data.headlines.filter(h => h.fact_ids && h.fact_ids.length > 0).length;
+
   return (
     <div className="space-y-6">
-      {/* Header with timestamp */}
+      {/* Header with timestamp and stats */}
       <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
         <div className="flex items-center gap-3">
           <Clock className="w-5 h-5 text-gray-500" />
@@ -175,17 +203,74 @@ export default function HeadlinesList({ initialData }: HeadlinesListProps) {
         </div>
       </div>
 
+      {/* Stats bar */}
+      <div className="flex flex-wrap items-center gap-4 p-4 rounded-xl bg-white/5 border border-white/10">
+        {/* Verified indicator */}
+        <div className="flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+          <span className="text-sm text-gray-300">
+            <span className="text-emerald-400 font-medium">{verifiedCount}/10</span> verified
+          </span>
+        </div>
+
+        {/* Divider */}
+        <div className="h-4 w-px bg-white/10" />
+
+        {/* Topics covered */}
+        <div className="flex items-center gap-2">
+          <Database className="w-4 h-4 text-cyan-400" />
+          <span className="text-sm text-gray-300">
+            {Object.keys(topicDist).length} topics
+          </span>
+        </div>
+
+        {/* Divider */}
+        <div className="h-4 w-px bg-white/10" />
+
+        {/* Regions */}
+        {uniqueRegions.length > 0 && (
+          <div className="flex-1 flex items-center gap-2 overflow-hidden">
+            <span className="text-sm text-gray-500 shrink-0">Regions:</span>
+            <div className="flex flex-wrap gap-1">
+              {uniqueRegions.slice(0, 5).map((region, idx) => (
+                <span
+                  key={idx}
+                  className="px-2 py-0.5 bg-white/5 rounded text-xs text-gray-400 border border-white/5"
+                >
+                  {region}
+                </span>
+              ))}
+              {uniqueRegions.length > 5 && (
+                <span className="text-xs text-gray-500">+{uniqueRegions.length - 5} more</span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Headlines grid */}
       <div className="grid gap-4 md:grid-cols-2">
         {data.headlines.map((headline, index) => (
-          <HeadlineCard key={index} headline={headline} rank={index + 1} />
+          <HeadlineCard key={headline.id || index} headline={headline} rank={index + 1} />
         ))}
       </div>
 
       {/* Footer */}
       {data.facts_summary && (
-        <div className="text-center text-xs text-gray-600 mt-8 pt-4 border-t border-white/5">
-          Data sources: {data.facts_summary}
+        <div className="mt-8 pt-4 border-t border-white/5">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="text-xs text-gray-600">
+              <span className="text-gray-500">Data sources:</span> {data.facts_summary}
+            </div>
+            {data.validation && (
+              <div className="flex items-center gap-2 text-xs">
+                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                <span className="text-gray-500">
+                  {data.validation.facts_used} facts used
+                </span>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

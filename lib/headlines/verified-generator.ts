@@ -57,6 +57,7 @@ Each headline must have:
 - headline: max 90 chars, factual claim from referenced fact
 - topic: severe|winter|flood|tropical|heat|fire|aviation|marine|general
 - confidence_label: Measured|Reported|High|Medium|Low (based on source type)
+- regions: array of affected states/regions (e.g., ["Texas", "Oklahoma"] or ["Central Plains"])
 - location: { state, place } - copied from fact
 - timestamp_utc: copied from fact
 - source_name: copied from fact
@@ -362,6 +363,7 @@ export async function generateVerifiedHeadlines(
           headline: `${fallbackFact.event_type} reported in ${fallbackFact.location.state}`,
           topic: 'general',
           confidence_label: fallbackFact.confidence,
+          regions: [fallbackFact.location.state],
           location: {
             state: fallbackFact.location.state,
             place: fallbackFact.location.place,
@@ -378,6 +380,7 @@ export async function generateVerifiedHeadlines(
           headline: 'Check NWS for current weather conditions',
           topic: 'general',
           confidence_label: 'Low',
+          regions: ['United States'],
           location: {
             state: 'United States',
             place: 'Nationwide',

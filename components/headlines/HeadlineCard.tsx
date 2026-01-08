@@ -1,6 +1,7 @@
 'use client';
 
-import { ExternalLink, Clock, MapPin, CheckCircle } from 'lucide-react';
+import { useState } from 'react';
+import { ExternalLink, Clock, MapPin, CheckCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { Headline, HeadlineTopic, ConfidenceLabel } from '@/lib/headlines/types';
 
 // Topic colors and icons
@@ -131,6 +132,21 @@ function formatTimeAgo(timestamp: string): string {
 }
 
 /**
+ * Format timestamp to full date/time
+ */
+function formatFullTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  return date.toLocaleString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+}
+
+/**
  * Check if headline has verified fact references
  */
 function hasFactReferences(headline: Headline): boolean {
@@ -138,9 +154,11 @@ function hasFactReferences(headline: Headline): boolean {
 }
 
 export default function HeadlineCard({ headline, rank }: HeadlineCardProps) {
+  const [expanded, setExpanded] = useState(false);
   const config = topicConfig[headline.topic] || topicConfig.general;
   const confConfig = confidenceConfig[headline.confidence_label] || confidenceConfig.Low;
   const isVerified = hasFactReferences(headline);
+  const regions = headline.regions || [];
 
   return (
     <div
@@ -172,6 +190,25 @@ export default function HeadlineCard({ headline, rank }: HeadlineCardProps) {
           </h3>
         </div>
 
+        {/* Regions */}
+        {regions.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {regions.slice(0, expanded ? regions.length : 3).map((region, idx) => (
+              <span
+                key={idx}
+                className="px-2 py-0.5 bg-white/5 rounded text-xs text-gray-300 border border-white/10"
+              >
+                {region}
+              </span>
+            ))}
+            {!expanded && regions.length > 3 && (
+              <span className="px-2 py-0.5 text-xs text-gray-500">
+                +{regions.length - 3} more
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Meta row */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
           {/* Topic chip */}
@@ -197,7 +234,10 @@ export default function HeadlineCard({ headline, rank }: HeadlineCardProps) {
 
           {/* Timestamp */}
           {headline.timestamp_utc && (
-            <span className="flex items-center gap-1 px-2 py-0.5 bg-white/5 rounded text-xs text-gray-400 border border-white/10">
+            <span
+              className="flex items-center gap-1 px-2 py-0.5 bg-white/5 rounded text-xs text-gray-400 border border-white/10"
+              title={formatFullTime(headline.timestamp_utc)}
+            >
               <Clock size={10} />
               {formatTimeAgo(headline.timestamp_utc)}
             </span>
@@ -221,19 +261,72 @@ export default function HeadlineCard({ headline, rank }: HeadlineCardProps) {
           </span>
         </div>
 
-        {/* Source link */}
-        <a
-          href={headline.source_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="
-            inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-cyan-400
-            transition-colors duration-200
-          "
-        >
-          <ExternalLink size={12} />
-          <span>{headline.source_name}</span>
-        </a>
+        {/* Expandable details section */}
+        {expanded && (
+          <div className="mt-4 pt-4 border-t border-white/10 space-y-3 animate-in slide-in-from-top-2 duration-200">
+            {/* Full timestamp */}
+            <div className="text-xs text-gray-500">
+              <span className="text-gray-400 font-medium">Time:</span> {formatFullTime(headline.timestamp_utc)}
+            </div>
+
+            {/* All regions */}
+            {regions.length > 3 && (
+              <div>
+                <span className="text-xs text-gray-400 font-medium">All regions:</span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {regions.map((region, idx) => (
+                    <span
+                      key={idx}
+                      className="px-2 py-0.5 bg-white/5 rounded text-xs text-gray-300 border border-white/10"
+                    >
+                      {region}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Fact IDs for transparency */}
+            {headline.fact_ids.length > 0 && (
+              <div className="text-xs">
+                <span className="text-gray-400 font-medium">Backed by {headline.fact_ids.length} verified facts</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Source link and expand toggle */}
+        <div className="flex items-center justify-between mt-2">
+          <a
+            href={headline.source_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="
+              inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-cyan-400
+              transition-colors duration-200
+            "
+          >
+            <ExternalLink size={12} />
+            <span>{headline.source_name}</span>
+          </a>
+
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            {expanded ? (
+              <>
+                <span>Less</span>
+                <ChevronUp size={14} />
+              </>
+            ) : (
+              <>
+                <span>More</span>
+                <ChevronDown size={14} />
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Verified indicator dot in corner */}

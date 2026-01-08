@@ -109,6 +109,7 @@ export async function generateHeadlines(
         headline: 'Quiet weather pattern expected across much of the nation',
         topic: 'general',
         confidence_label: 'Low',
+        regions: ['United States'],
         location: { state: 'United States', place: 'Nationwide' },
         timestamp_utc: new Date().toISOString(),
         source_name: 'NWS National Overview',
