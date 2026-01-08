@@ -6,13 +6,17 @@
  *
  * Security: Requires CRON_SECRET header in production.
  *
- * Uses the verified headlines system with strict fact validation.
+ * Uses the Xweather headlines system with strict fact validation.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { buildVerifiedFactsBundle } from '@/lib/headlines/verified-fetchers';
-import { generateVerifiedHeadlines } from '@/lib/headlines/verified-generator';
-import { storeHeadlinesRun, needsNewRun, getLatestRun } from '@/lib/headlines/storage';
+import {
+  buildXweatherFactsBundle,
+  generateXweatherHeadlines,
+  storeHeadlinesRun,
+  needsNewRun,
+  getLatestRun,
+} from '@/lib/xweather';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -38,33 +42,41 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
+    const openaiKey = process.env.OPENAI_API_KEY;
+    const xweatherClientId = process.env.XWEATHER_CLIENT_ID;
+    const xweatherClientSecret = process.env.XWEATHER_CLIENT_SECRET;
+
+    if (!openaiKey) {
       return NextResponse.json(
         { error: 'OPENAI_API_KEY not configured' },
         { status: 500 }
       );
     }
 
-    console.log('[Headlines Cron] Starting verified headlines generation...');
+    if (!xweatherClientId || !xweatherClientSecret) {
+      return NextResponse.json(
+        { error: 'XWEATHER_CLIENT_ID and XWEATHER_CLIENT_SECRET must be configured' },
+        { status: 500 }
+      );
+    }
 
-    // Fetch all data sources and build verified facts bundle
-    const factsBundle = await buildVerifiedFactsBundle();
+    console.log('[Headlines Cron] Starting Xweather-based headlines generation...');
+
+    // Fetch all data sources and build facts bundle
+    const factsBundle = await buildXweatherFactsBundle();
     console.log(`[Headlines Cron] Fetched ${factsBundle.facts.length} verified facts`);
-    console.log(`[Headlines Cron] Breakdown: ${factsBundle.counts.alerts} alerts, ${factsBundle.counts.lsr} LSR, ${factsBundle.counts.station_obs} station obs`);
+    console.log(`[Headlines Cron] Breakdown: ${factsBundle.counts.observations} obs, ${factsBundle.counts.storm_reports} reports, ${factsBundle.counts.alerts} alerts`);
 
     // Generate headlines with strict fact validation
-    const headlines = await generateVerifiedHeadlines(factsBundle, apiKey);
+    const headlines = await generateXweatherHeadlines(factsBundle, openaiKey);
     console.log(`[Headlines Cron] Generated ${headlines.length} verified headlines`);
 
     // Build facts summary
     const factsSummary = [
-      `${factsBundle.counts.alerts} alerts`,
-      `${factsBundle.counts.lsr} storm reports`,
-      `${factsBundle.counts.station_obs} station obs`,
-      `${factsBundle.counts.spc} SPC outlooks`,
-      `${factsBundle.counts.wpc} WPC ERO`,
-    ].filter(s => !s.startsWith('0 ')).join(', ');
+      factsBundle.counts.observations > 0 ? `${factsBundle.counts.observations} observations` : null,
+      factsBundle.counts.storm_reports > 0 ? `${factsBundle.counts.storm_reports} storm reports` : null,
+      factsBundle.counts.alerts > 0 ? `${factsBundle.counts.alerts} alerts` : null,
+    ].filter(Boolean).join(', ') || 'No active data';
 
     // Store the run
     const run = storeHeadlinesRun(headlines, factsSummary);

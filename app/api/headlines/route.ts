@@ -1,20 +1,25 @@
 /**
  * GET /api/headlines
  *
- * Returns the latest headlines run.
- * If no run exists, generates headlines on-demand using the verified generator.
+ * Returns the latest headlines run using Xweather as the primary data source.
+ * If no run exists or it's stale, generates headlines on-demand.
  *
- * VERIFIED HEADLINES SYSTEM:
- * - All headlines are backed by verified facts from live data sources
+ * XWEATHER HEADLINES SYSTEM:
+ * - All headlines are backed by verified facts from Xweather API
  * - Every headline includes fact_ids referencing the source facts
- * - No hallucination - all claims traceable to sources
+ * - No hallucination - all claims traceable to Xweather data
  */
 
 import { NextResponse } from 'next/server';
-import { getLatestRun, storeHeadlinesRun, needsNewRun } from '@/lib/headlines/storage';
-import { buildVerifiedFactsBundle } from '@/lib/headlines/verified-fetchers';
-import { generateVerifiedHeadlines } from '@/lib/headlines/verified-generator';
-import { Headline } from '@/lib/headlines/types';
+import {
+  getLatestRun,
+  storeHeadlinesRun,
+  needsNewRun,
+  buildXweatherFactsBundle,
+  generateXweatherHeadlines,
+  generatePlaceholderHeadlines,
+  XweatherHeadline,
+} from '@/lib/xweather';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -26,38 +31,51 @@ export async function GET() {
 
     // If no run exists or it's stale, generate new headlines
     if (!run || needsNewRun()) {
-      const apiKey = process.env.OPENAI_API_KEY;
+      const openaiKey = process.env.OPENAI_API_KEY;
+      const xweatherClientId = process.env.XWEATHER_CLIENT_ID;
+      const xweatherClientSecret = process.env.XWEATHER_CLIENT_SECRET;
 
-      if (!apiKey) {
-        // Return placeholder if no API key
+      // Check for required API keys
+      if (!openaiKey) {
+        console.warn('[Headlines API] OPENAI_API_KEY not configured');
         return NextResponse.json({
           id: 'placeholder',
           timestamp: new Date().toISOString(),
           headlines: generatePlaceholderHeadlines(),
-          facts_summary: 'API key not configured',
+          facts_summary: 'OpenAI API key not configured',
+          validation: { facts_used: 0, headlines_validated: false },
+        });
+      }
+
+      if (!xweatherClientId || !xweatherClientSecret) {
+        console.warn('[Headlines API] Xweather credentials not configured');
+        return NextResponse.json({
+          id: 'placeholder',
+          timestamp: new Date().toISOString(),
+          headlines: generatePlaceholderHeadlines(),
+          facts_summary: 'Xweather API credentials not configured',
+          validation: { facts_used: 0, headlines_validated: false },
         });
       }
 
       try {
-        console.log('[Headlines API] Generating verified headlines...');
+        console.log('[Headlines API] Generating Xweather headlines...');
 
-        // Fetch all data sources and build verified facts bundle
-        const factsBundle = await buildVerifiedFactsBundle();
+        // Fetch all data sources and build facts bundle
+        const factsBundle = await buildXweatherFactsBundle();
         console.log(`[Headlines API] Facts bundle: ${factsBundle.facts.length} verified facts`);
-        console.log(`[Headlines API] Breakdown: ${factsBundle.counts.alerts} alerts, ${factsBundle.counts.lsr} LSR, ${factsBundle.counts.station_obs} station obs`);
+        console.log(`[Headlines API] Breakdown: ${factsBundle.counts.observations} obs, ${factsBundle.counts.storm_reports} reports, ${factsBundle.counts.alerts} alerts`);
 
         // Generate headlines with strict fact validation
-        const headlines = await generateVerifiedHeadlines(factsBundle, apiKey);
+        const headlines = await generateXweatherHeadlines(factsBundle, openaiKey);
         console.log(`[Headlines API] Generated ${headlines.length} verified headlines`);
 
         // Build facts summary
         const factsSummary = [
-          `${factsBundle.counts.alerts} alerts`,
-          `${factsBundle.counts.lsr} storm reports`,
-          `${factsBundle.counts.station_obs} station obs`,
-          `${factsBundle.counts.spc} SPC outlooks`,
-          `${factsBundle.counts.wpc} WPC ERO`,
-        ].filter(s => !s.startsWith('0 ')).join(', ');
+          factsBundle.counts.observations > 0 ? `${factsBundle.counts.observations} observations` : null,
+          factsBundle.counts.storm_reports > 0 ? `${factsBundle.counts.storm_reports} storm reports` : null,
+          factsBundle.counts.alerts > 0 ? `${factsBundle.counts.alerts} alerts` : null,
+        ].filter(Boolean).join(', ') || 'No active data';
 
         // Store the run
         run = storeHeadlinesRun(headlines, factsSummary);
@@ -75,6 +93,7 @@ export async function GET() {
           timestamp: new Date().toISOString(),
           headlines: generatePlaceholderHeadlines(),
           facts_summary: 'Generation temporarily unavailable',
+          validation: { facts_used: 0, headlines_validated: false },
         });
       }
     }
@@ -91,135 +110,4 @@ export async function GET() {
       { status: 500 }
     );
   }
-}
-
-/**
- * Generate placeholder headlines when generation fails
- * These are generic and don't make specific claims
- */
-function generatePlaceholderHeadlines(): Headline[] {
-  const now = new Date().toISOString();
-
-  return [
-    {
-      id: 'p1',
-      headline: 'Check NWS for active weather alerts across the United States',
-      topic: 'general',
-      confidence_label: 'Medium',
-      regions: ['United States'],
-      location: { state: 'United States', place: 'Nationwide' },
-      timestamp_utc: now,
-      source_name: 'NWS',
-      source_url: 'https://www.weather.gov/alerts',
-      fact_ids: [],
-    },
-    {
-      id: 'p2',
-      headline: 'SPC monitoring severe weather potential across the Plains',
-      topic: 'severe',
-      confidence_label: 'Medium',
-      regions: ['Central Plains', 'Southern Plains'],
-      location: { state: 'Multiple States', place: 'Central US' },
-      timestamp_utc: now,
-      source_name: 'SPC',
-      source_url: 'https://www.spc.noaa.gov/',
-      fact_ids: [],
-    },
-    {
-      id: 'p3',
-      headline: 'WPC tracking precipitation patterns nationwide',
-      topic: 'flood',
-      confidence_label: 'Medium',
-      regions: ['United States'],
-      location: { state: 'United States', place: 'Nationwide' },
-      timestamp_utc: now,
-      source_name: 'WPC',
-      source_url: 'https://www.wpc.ncep.noaa.gov/',
-      fact_ids: [],
-    },
-    {
-      id: 'p4',
-      headline: 'NHC monitoring tropical activity in Atlantic basin',
-      topic: 'tropical',
-      confidence_label: 'Medium',
-      regions: ['Atlantic Basin', 'Gulf Coast'],
-      location: { state: 'Multiple States', place: 'Atlantic Basin' },
-      timestamp_utc: now,
-      source_name: 'NHC',
-      source_url: 'https://www.nhc.noaa.gov/',
-      fact_ids: [],
-    },
-    {
-      id: 'p5',
-      headline: 'Local Storm Reports available via Iowa Mesonet',
-      topic: 'severe',
-      confidence_label: 'High',
-      regions: ['United States'],
-      location: { state: 'United States', place: 'Nationwide' },
-      timestamp_utc: now,
-      source_name: 'IEM',
-      source_url: 'https://mesonet.agron.iastate.edu/lsr/',
-      fact_ids: [],
-    },
-    {
-      id: 'p6',
-      headline: 'Real-time observations updating from ASOS stations',
-      topic: 'general',
-      confidence_label: 'Measured',
-      regions: ['United States'],
-      location: { state: 'United States', place: 'Nationwide' },
-      timestamp_utc: now,
-      source_name: 'NWS ASOS',
-      source_url: 'https://www.weather.gov/asos/',
-      fact_ids: [],
-    },
-    {
-      id: 'p7',
-      headline: 'Fire weather conditions being monitored in Western states',
-      topic: 'fire',
-      confidence_label: 'Medium',
-      regions: ['California', 'Arizona', 'Nevada', 'Oregon'],
-      location: { state: 'Multiple States', place: 'Western US' },
-      timestamp_utc: now,
-      source_name: 'NWS',
-      source_url: 'https://www.weather.gov/',
-      fact_ids: [],
-    },
-    {
-      id: 'p8',
-      headline: 'Winter weather outlooks available for Northern tier',
-      topic: 'winter',
-      confidence_label: 'Medium',
-      regions: ['Northern Plains', 'Upper Midwest', 'Northeast'],
-      location: { state: 'Multiple States', place: 'Northern US' },
-      timestamp_utc: now,
-      source_name: 'NWS',
-      source_url: 'https://www.weather.gov/',
-      fact_ids: [],
-    },
-    {
-      id: 'p9',
-      headline: 'Marine forecasts updated for coastal waters',
-      topic: 'marine',
-      confidence_label: 'High',
-      regions: ['Atlantic Coast', 'Gulf Coast', 'Pacific Coast'],
-      location: { state: 'Multiple States', place: 'Coastal US' },
-      timestamp_utc: now,
-      source_name: 'NWS Marine',
-      source_url: 'https://www.weather.gov/marine',
-      fact_ids: [],
-    },
-    {
-      id: 'p10',
-      headline: 'Aviation weather products available from AWC',
-      topic: 'aviation',
-      confidence_label: 'High',
-      regions: ['United States'],
-      location: { state: 'United States', place: 'Nationwide' },
-      timestamp_utc: now,
-      source_name: 'AWC',
-      source_url: 'https://www.aviationweather.gov/',
-      fact_ids: [],
-    },
-  ];
 }
