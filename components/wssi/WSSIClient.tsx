@@ -218,14 +218,15 @@ export default function WSSIClient() {
 
       if (!props) return;
 
+      // Use inline styles since Tailwind classes won't work in Mapbox popups
       const html = `
-        <div class="p-2 text-sm">
-          <div class="font-semibold text-white mb-1">Day ${props.day} Outlook</div>
-          <div class="flex items-center gap-2 mb-1">
-            <span class="w-3 h-3 rounded-sm" style="background-color: ${props.riskColor}"></span>
-            <span class="text-white">${props.riskLabel}</span>
+        <div style="padding: 8px; font-size: 14px;">
+          <div style="font-weight: 600; color: white; margin-bottom: 4px;">Day ${props.day} Outlook</div>
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+            <span style="width: 12px; height: 12px; border-radius: 2px; background-color: ${props.riskColor}; display: inline-block;"></span>
+            <span style="color: white;">${props.riskLabel}</span>
           </div>
-          <div class="text-gray-400 text-xs">WSSI: ${props.originalLabel}</div>
+          <div style="color: #9ca3af; font-size: 12px;">WSSI: ${props.originalLabel}</div>
         </div>
       `;
 

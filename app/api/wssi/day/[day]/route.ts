@@ -92,9 +92,10 @@ function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
 
 /**
  * Apply smoothing to a polygon's coordinates
+ * Using 4 iterations for very smooth curves
  */
 function smoothPolygonCoords(rings: number[][][]): number[][][] {
-  return rings.map(ring => chaikinSmooth(ring, 2));
+  return rings.map(ring => chaikinSmooth(ring, 4));
 }
 
 /**
@@ -184,17 +185,17 @@ async function fetchWSSIFromMapServer(day: number): Promise<{ geojson: GeoJSON.F
     }
 
     try {
-      // Step 1: Simplify to remove jagged grid edges
+      // Step 1: Simplify to remove jagged grid edges (higher tolerance = smoother)
       let simplified = turf.simplify(feature as turf.AllGeoJSON, {
-        tolerance: 0.005,
+        tolerance: 0.01,
         highQuality: true,
       }) as GeoJSON.Feature;
 
-      // Step 2: Apply buffer trick to round sharp corners
+      // Step 2: Apply buffer trick to round sharp corners (larger buffer = rounder)
       try {
-        const bufferedOut = turf.buffer(simplified, 0.5, { units: 'kilometers' });
+        const bufferedOut = turf.buffer(simplified, 2, { units: 'kilometers' });
         if (bufferedOut) {
-          const bufferedIn = turf.buffer(bufferedOut, -0.5, { units: 'kilometers' });
+          const bufferedIn = turf.buffer(bufferedOut, -2, { units: 'kilometers' });
           if (bufferedIn && bufferedIn.geometry) {
             simplified = bufferedIn as GeoJSON.Feature;
           }
@@ -203,7 +204,7 @@ async function fetchWSSIFromMapServer(day: number): Promise<{ geojson: GeoJSON.F
         // Buffer can fail on complex geometries, continue with simplified
       }
 
-      // Step 3: Apply Chaikin smoothing
+      // Step 3: Apply Chaikin smoothing (4 iterations in smoothPolygonCoords)
       const smoothedGeometry = smoothGeometry(simplified.geometry!);
 
       // Extract and normalize properties
