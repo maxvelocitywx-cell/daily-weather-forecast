@@ -314,9 +314,22 @@ export default function AlertsMapClient({
     };
   }, []);
 
+  // Helper to find the first symbol layer id (for inserting alerts below labels)
+  const getFirstSymbolLayerId = useCallback((): string | undefined => {
+    if (!map.current) return undefined;
+    const style = map.current.getStyle();
+    if (!style || !style.layers) return undefined;
+    const firstSymbol = style.layers.find(l => l.type === 'symbol');
+    return firstSymbol?.id;
+  }, []);
+
   // Add/update alert layers - ONLY fill and line layers, NO point/circle/symbol layers
+  // All alert layers are inserted BELOW the first symbol layer so labels remain on top
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
+
+    // Find the first symbol layer to insert alerts below it
+    const firstSymbolId = getFirstSymbolLayerId();
 
     // Add or update polygon source
     const polygonSource = map.current.getSource('alert-polygons') as mapboxgl.GeoJSONSource;
@@ -328,7 +341,7 @@ export default function AlertsMapClient({
         data: polygonGeoJSON
       });
 
-      // Fill layer for polygons
+      // Fill layer for polygons - insert BELOW first symbol layer
       map.current.addLayer({
         id: 'alert-polygons-fill',
         type: 'fill',
@@ -344,9 +357,9 @@ export default function AlertsMapClient({
             ['get', 'fillOpacity']
           ]
         }
-      });
+      }, firstSymbolId);
 
-      // Stroke layer for polygons (100% opacity)
+      // Stroke layer for polygons (100% opacity) - insert BELOW first symbol layer
       map.current.addLayer({
         id: 'alert-polygons-stroke',
         type: 'line',
@@ -363,7 +376,7 @@ export default function AlertsMapClient({
           ],
           'line-opacity': 1
         }
-      });
+      }, firstSymbolId);
     }
 
     // Add or update line source (for LineString geometries)
@@ -376,7 +389,7 @@ export default function AlertsMapClient({
         data: lineGeoJSON
       });
 
-      // Line layer (outline only, no fill)
+      // Line layer (outline only, no fill) - insert BELOW first symbol layer
       map.current.addLayer({
         id: 'alert-lines',
         type: 'line',
@@ -393,9 +406,38 @@ export default function AlertsMapClient({
           ],
           'line-opacity': 1
         }
-      });
+      }, firstSymbolId);
     }
-  }, [mapLoaded, polygonGeoJSON, lineGeoJSON]);
+  }, [mapLoaded, polygonGeoJSON, lineGeoJSON, getFirstSymbolLayerId]);
+
+  // Re-order alert layers below labels when style changes
+  useEffect(() => {
+    if (!map.current) return;
+
+    const handleStyleData = () => {
+      if (!map.current) return;
+
+      const firstSymbolId = getFirstSymbolLayerId();
+      if (!firstSymbolId) return;
+
+      // Move alert layers below the first symbol layer if they exist
+      if (map.current.getLayer('alert-polygons-fill')) {
+        map.current.moveLayer('alert-polygons-fill', firstSymbolId);
+      }
+      if (map.current.getLayer('alert-polygons-stroke')) {
+        map.current.moveLayer('alert-polygons-stroke', firstSymbolId);
+      }
+      if (map.current.getLayer('alert-lines')) {
+        map.current.moveLayer('alert-lines', firstSymbolId);
+      }
+    };
+
+    map.current.on('styledata', handleStyleData);
+
+    return () => {
+      map.current?.off('styledata', handleStyleData);
+    };
+  }, [getFirstSymbolLayerId]);
 
   // Handle selection state
   useEffect(() => {
