@@ -333,12 +333,12 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
     }
 
     try {
-      // Simplify with gentler tolerance first
+      // Simplify geometry (skip expensive buffer/smoothing for serverless perf)
       let processed: GeoJSON.Feature;
       try {
         processed = turf.simplify(band as turf.AllGeoJSON, {
-          tolerance: 0.005,
-          highQuality: true,
+          tolerance: 0.01, // Slightly more aggressive simplification
+          highQuality: false, // Faster
         }) as GeoJSON.Feature;
       } catch {
         // If simplify fails, use original
@@ -351,21 +351,8 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
         continue;
       }
 
-      // Buffer trick for rounded corners
-      try {
-        const bufferedOut = turf.buffer(processed, 1.5, { units: 'kilometers' });
-        if (bufferedOut) {
-          const bufferedIn = turf.buffer(bufferedOut, -1.5, { units: 'kilometers' });
-          if (bufferedIn && bufferedIn.geometry) {
-            processed = bufferedIn as GeoJSON.Feature;
-          }
-        }
-      } catch {
-        // Continue with simplified if buffer fails
-      }
-
-      // Apply Chaikin smoothing
-      const smoothedGeometry = smoothGeometry(processed.geometry!);
+      // Use simplified geometry directly (skip expensive buffer/Chaikin for serverless)
+      const finalGeometry = processed.geometry;
 
       const riskLabel = WSSI_TO_RISK[category];
       const originalCategory = WSSI_CATEGORY_LABELS[category];
@@ -374,7 +361,7 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
 
       processedFeatures.push({
         type: 'Feature',
-        geometry: smoothedGeometry,
+        geometry: finalGeometry,
         properties: {
           day,
           category,
