@@ -51,10 +51,15 @@ export default function WSSIClient() {
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Use ref to track loading state without causing re-renders
+  const loadingRef = useRef<Record<number, boolean>>({});
+
   // Fetch WSSI data for a specific day
   const fetchWSSIData = useCallback(async (day: number) => {
-    if (loading[day]) return;
+    // Use ref to check loading state to avoid dependency issues
+    if (loadingRef.current[day]) return;
 
+    loadingRef.current[day] = true;
     setLoading(prev => ({ ...prev, [day]: true }));
     setError(null);
 
@@ -81,9 +86,10 @@ export default function WSSIClient() {
       console.error('Error fetching WSSI data:', err);
       setError(err instanceof Error ? err.message : 'Failed to load WSSI data');
     } finally {
+      loadingRef.current[day] = false;
       setLoading(prev => ({ ...prev, [day]: false }));
     }
-  }, [loading]);
+  }, []);
 
   // Initialize map
   useEffect(() => {
@@ -121,12 +127,12 @@ export default function WSSIClient() {
     };
   }, []);
 
-  // Fetch initial data when map loads
+  // Fetch initial data when map loads or day changes
   useEffect(() => {
-    if (mapLoaded) {
+    if (mapLoaded && !wssiData[selectedDay]) {
       fetchWSSIData(selectedDay);
     }
-  }, [mapLoaded, selectedDay, fetchWSSIData]);
+  }, [mapLoaded, selectedDay, wssiData, fetchWSSIData]);
 
   // Update map layers when data or selected day changes
   useEffect(() => {
