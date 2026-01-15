@@ -175,21 +175,22 @@ function applyChaikinSmoothing(geometry: Geometry, iterations: number = 3): Geom
 }
 
 /**
- * Full smoothing pipeline for organic, rounded shapes:
- * 1. Light simplification to remove grid stair-steps
- * 2. Chaikin smoothing (2-3 iterations) to round corners
- * 3. Buffer OUT then IN (critical for circular curvature)
- * 4. Final Chaikin pass to clean up buffer artifacts
+ * Serverless-optimized smoothing pipeline:
+ * 1. Simplification to remove grid stair-steps
+ * 2. Chaikin smoothing (2 iterations) to round corners
+ * 3. Final simplification to reduce point count
+ *
+ * Note: Buffer operations removed - too expensive for serverless
  */
 function smoothGeometryFull(feature: PolygonFeature): PolygonFeature | null {
   try {
     let current = feature;
 
-    // Step 1: Light simplification to remove grid artifacts
+    // Step 1: Simplification to remove grid artifacts
     try {
       const simplified = turf.simplify(current, {
-        tolerance: 0.02, // ~2km at mid-latitudes
-        highQuality: true, // Topology-preserving
+        tolerance: 0.015, // ~1.5km at mid-latitudes
+        highQuality: false, // Faster for serverless
       });
       if (simplified && simplified.geometry) {
         current = simplified as PolygonFeature;
@@ -198,44 +199,18 @@ function smoothGeometryFull(feature: PolygonFeature): PolygonFeature | null {
       console.log('[WSSI] Simplify failed, continuing with original');
     }
 
-    // Step 2: First Chaikin pass (3 iterations)
+    // Step 2: Chaikin smoothing (2 iterations for rounded corners)
     if (current.geometry) {
       current = {
         ...current,
-        geometry: applyChaikinSmoothing(current.geometry, 3) as Polygon | MultiPolygon,
+        geometry: applyChaikinSmoothing(current.geometry, 2) as Polygon | MultiPolygon,
       };
     }
 
-    // Step 3: Buffer OUT then IN for circular curvature
-    // Buffer distance in kilometers (converted to degrees roughly)
-    const bufferDistanceKm = 15; // ~15km buffer
-
-    try {
-      // Buffer outward
-      const bufferedOut = turf.buffer(current, bufferDistanceKm, { units: 'kilometers' });
-      if (bufferedOut && bufferedOut.geometry) {
-        // Buffer inward by same distance
-        const bufferedIn = turf.buffer(bufferedOut, -bufferDistanceKm, { units: 'kilometers' });
-        if (bufferedIn && bufferedIn.geometry) {
-          current = bufferedIn as PolygonFeature;
-        }
-      }
-    } catch (e) {
-      console.log('[WSSI] Buffer rounding failed, using Chaikin-only result');
-    }
-
-    // Step 4: Final Chaikin pass (1 iteration) to clean buffer artifacts
-    if (current.geometry) {
-      current = {
-        ...current,
-        geometry: applyChaikinSmoothing(current.geometry, 1) as Polygon | MultiPolygon,
-      };
-    }
-
-    // Final simplification to reduce point count
+    // Step 3: Final simplification to reduce point count
     try {
       const finalSimplified = turf.simplify(current, {
-        tolerance: 0.005, // Light final simplification
+        tolerance: 0.008,
         highQuality: false,
       });
       if (finalSimplified && finalSimplified.geometry) {
@@ -247,7 +222,7 @@ function smoothGeometryFull(feature: PolygonFeature): PolygonFeature | null {
 
     return current;
   } catch (err) {
-    console.error('[WSSI] Full smoothing failed:', err);
+    console.error('[WSSI] Smoothing failed:', err);
     return feature; // Return original on failure
   }
 }
