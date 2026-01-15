@@ -8,10 +8,11 @@ import { Maximize2, Play, Pause } from 'lucide-react';
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
 
-// Unified Radar Animation Config (both modes use same timing)
+// Unified Radar Animation Config
 const FRAME_COUNT = 25; // 25 frames = 120 minutes at 5-min intervals
 const FRAME_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
-const ANIMATION_SPEED_MS = 250; // Fast loop 250ms per frame
+const ANIMATION_SPEED_MS = 300; // Target frame interval
+const CROSSFADE_DURATION_MS = 200; // Crossfade transition duration
 const RADAR_OPACITY = 0.95;
 
 // NOAA MRMS ImageServer base URL (base reflectivity)
@@ -265,6 +266,14 @@ function getBoundsFromGeometry(geometry: AlertGeometry): mapboxgl.LngLatBounds |
   }
 }
 
+// Double-buffer state for smooth animation
+interface BufferState {
+  activeBuffer: 'A' | 'B';
+  bufferAFrameIndex: number;
+  bufferBFrameIndex: number;
+  isTransitioning: boolean;
+}
+
 export default function AlertsMapClient({
   alerts,
   selectedAlertId,
@@ -275,7 +284,8 @@ export default function AlertsMapClient({
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const hoverPopup = useRef<mapboxgl.Popup | null>(null);
-  const animationRef = useRef<NodeJS.Timeout | null>(null);
+  const animationRef = useRef<number | null>(null);
+  const lastFrameTimeRef = useRef<number>(0);
 
   const [mapLoaded, setMapLoaded] = useState(false);
   const [legendExpanded, setLegendExpanded] = useState(false);
@@ -283,10 +293,17 @@ export default function AlertsMapClient({
   // Unified radar state
   const [radarMode, setRadarMode] = useState<RadarMode>('RADAR');
   const [isPlaying, setIsPlaying] = useState(true);
-  const [currentFrameIndex, setCurrentFrameIndex] = useState(FRAME_COUNT - 1); // Start at newest
+  const [currentFrameIndex, setCurrentFrameIndex] = useState(FRAME_COUNT - 1);
   const [frames, setFrames] = useState<{ timestamp: number; isoUtc: string; localLabel: string }[]>([]);
-  const [radarLayersReady, setRadarLayersReady] = useState(false);
-  const [ptypeLayersReady, setPtypeLayersReady] = useState(false);
+  const [layersReady, setLayersReady] = useState(false);
+
+  // Double-buffer state
+  const bufferStateRef = useRef<BufferState>({
+    activeBuffer: 'A',
+    bufferAFrameIndex: FRAME_COUNT - 1,
+    bufferBFrameIndex: 0,
+    isTransitioning: false,
+  });
 
   // Generate frames on mount and refresh every 5 minutes
   useEffect(() => {
@@ -379,7 +396,7 @@ export default function AlertsMapClient({
     return () => {
       resizeObserver.disconnect();
       if (animationRef.current) {
-        clearInterval(animationRef.current);
+        cancelAnimationFrame(animationRef.current);
       }
       map.current?.remove();
       map.current = null;
@@ -395,139 +412,352 @@ export default function AlertsMapClient({
     return firstSymbol?.id;
   }, []);
 
-  // Add RADAR layers (one per frame)
+  // Get tile URL for current mode and frame
+  const getTileUrl = useCallback((frameIndex: number, mode: RadarMode): string => {
+    if (frames.length === 0) return '';
+    const frame = frames[frameIndex];
+    if (!frame) return '';
+
+    if (mode === 'RADAR') {
+      return buildRadarTileUrl(frame.timestamp);
+    } else if (mode === 'PTYPE') {
+      return buildPtypeTileUrl(frame.isoUtc);
+    }
+    return '';
+  }, [frames]);
+
+  // Initialize double-buffered radar layers (A and B for each mode)
   useEffect(() => {
     if (!mapLoaded || !map.current || frames.length === 0) return;
 
     const firstSymbolId = getFirstSymbolLayerId();
+    const m = map.current;
 
-    // Add radar sources and layers for each frame
-    frames.forEach((frame, index) => {
-      const sourceId = `radar-source-${index}`;
-      const layerId = `radar-layer-${index}`;
+    // Create sources and layers for both buffers (A and B) for both modes
+    const buffers = ['A', 'B'] as const;
+    const modes = ['radar', 'ptype'] as const;
 
-      if (!map.current?.getSource(sourceId)) {
-        map.current?.addSource(sourceId, {
-          type: 'raster',
-          tiles: [buildRadarTileUrl(frame.timestamp)],
-          tileSize: 256,
-          attribution: 'NOAA MRMS'
-        });
+    for (const mode of modes) {
+      for (const buffer of buffers) {
+        const sourceId = `${mode}-source-${buffer}`;
+        const layerId = `${mode}-layer-${buffer}`;
 
-        map.current?.addLayer({
-          id: layerId,
-          type: 'raster',
-          source: sourceId,
-          paint: {
-            'raster-opacity': 0,
-            'raster-fade-duration': 0
-          }
-        }, firstSymbolId);
-      }
-    });
+        if (!m.getSource(sourceId)) {
+          // Initial URL - will be updated dynamically
+          const initialFrame = buffer === 'A' ? FRAME_COUNT - 1 : 0;
+          const initialUrl = mode === 'radar'
+            ? buildRadarTileUrl(frames[initialFrame]?.timestamp || Date.now())
+            : buildPtypeTileUrl(frames[initialFrame]?.isoUtc || new Date().toISOString());
 
-    setRadarLayersReady(true);
-  }, [mapLoaded, frames, getFirstSymbolLayerId]);
+          m.addSource(sourceId, {
+            type: 'raster',
+            tiles: [initialUrl],
+            tileSize: 256,
+            attribution: mode === 'radar' ? 'NOAA MRMS' : 'NOAA MRMS P-Type'
+          });
 
-  // Add P-TYPE layers (one per frame)
-  useEffect(() => {
-    if (!mapLoaded || !map.current || frames.length === 0) return;
-
-    const firstSymbolId = getFirstSymbolLayerId();
-
-    // Add p-type sources and layers for each frame
-    frames.forEach((frame, index) => {
-      const sourceId = `ptype-source-${index}`;
-      const layerId = `ptype-layer-${index}`;
-
-      if (!map.current?.getSource(sourceId)) {
-        map.current?.addSource(sourceId, {
-          type: 'raster',
-          tiles: [buildPtypeTileUrl(frame.isoUtc)],
-          tileSize: 256,
-          attribution: 'NOAA MRMS P-Type'
-        });
-
-        map.current?.addLayer({
-          id: layerId,
-          type: 'raster',
-          source: sourceId,
-          paint: {
-            'raster-opacity': 0,
-            'raster-fade-duration': 0
-          }
-        }, firstSymbolId);
-      }
-    });
-
-    setPtypeLayersReady(true);
-  }, [mapLoaded, frames, getFirstSymbolLayerId]);
-
-  // Update layer visibility based on mode and current frame
-  useEffect(() => {
-    if (!mapLoaded || !map.current) return;
-
-    // Update RADAR layers
-    if (radarLayersReady) {
-      frames.forEach((_, index) => {
-        const layerId = `radar-layer-${index}`;
-        if (map.current?.getLayer(layerId)) {
-          const shouldShow = radarMode === 'RADAR' && index === currentFrameIndex;
-          map.current.setPaintProperty(layerId, 'raster-opacity', shouldShow ? RADAR_OPACITY : 0);
+          m.addLayer({
+            id: layerId,
+            type: 'raster',
+            source: sourceId,
+            paint: {
+              'raster-opacity': 0,
+              'raster-fade-duration': 0
+            }
+          }, firstSymbolId);
         }
-      });
+      }
     }
 
-    // Update P-TYPE layers
-    if (ptypeLayersReady) {
-      frames.forEach((_, index) => {
-        const layerId = `ptype-layer-${index}`;
-        if (map.current?.getLayer(layerId)) {
-          const shouldShow = radarMode === 'PTYPE' && index === currentFrameIndex;
-          map.current.setPaintProperty(layerId, 'raster-opacity', shouldShow ? RADAR_OPACITY : 0);
-        }
-      });
-    }
-  }, [mapLoaded, radarLayersReady, ptypeLayersReady, radarMode, currentFrameIndex, frames]);
+    // Initialize buffer A as visible with the newest frame
+    bufferStateRef.current = {
+      activeBuffer: 'A',
+      bufferAFrameIndex: FRAME_COUNT - 1,
+      bufferBFrameIndex: 0,
+      isTransitioning: false,
+    };
 
-  // Animation loop
+    setLayersReady(true);
+  }, [mapLoaded, frames, getFirstSymbolLayerId]);
+
+  // Update source tiles URL (without removing/re-adding)
+  const updateSourceTiles = useCallback((sourceId: string, newUrl: string) => {
+    if (!map.current) return;
+
+    const source = map.current.getSource(sourceId) as mapboxgl.RasterTileSource;
+    if (source && typeof source.setTiles === 'function') {
+      source.setTiles([newUrl]);
+    }
+  }, []);
+
+  // Wait for source to be loaded
+  const waitForSourceLoad = useCallback((sourceId: string, timeout = 3000): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!map.current) {
+        resolve(false);
+        return;
+      }
+
+      const m = map.current;
+
+      // Check if already loaded
+      if (m.isSourceLoaded(sourceId)) {
+        resolve(true);
+        return;
+      }
+
+      const timeoutId = setTimeout(() => {
+        m.off('sourcedata', checkLoaded);
+        resolve(false); // Timeout - proceed anyway
+      }, timeout);
+
+      const checkLoaded = (e: mapboxgl.MapSourceDataEvent) => {
+        if (e.sourceId === sourceId && m.isSourceLoaded(sourceId)) {
+          clearTimeout(timeoutId);
+          m.off('sourcedata', checkLoaded);
+          resolve(true);
+        }
+      };
+
+      m.on('sourcedata', checkLoaded);
+    });
+  }, []);
+
+  // Crossfade between layers
+  const crossfade = useCallback((
+    showLayerId: string,
+    hideLayerId: string,
+    duration: number
+  ): Promise<void> => {
+    return new Promise((resolve) => {
+      if (!map.current) {
+        resolve();
+        return;
+      }
+
+      const m = map.current;
+      const steps = 10;
+      const stepDuration = duration / steps;
+      let step = 0;
+
+      const animate = () => {
+        step++;
+        const progress = step / steps;
+        const eased = progress; // Linear, could use easing function
+
+        const showOpacity = eased * RADAR_OPACITY;
+        const hideOpacity = (1 - eased) * RADAR_OPACITY;
+
+        if (m.getLayer(showLayerId)) {
+          m.setPaintProperty(showLayerId, 'raster-opacity', showOpacity);
+        }
+        if (m.getLayer(hideLayerId)) {
+          m.setPaintProperty(hideLayerId, 'raster-opacity', hideOpacity);
+        }
+
+        if (step < steps) {
+          setTimeout(animate, stepDuration);
+        } else {
+          resolve();
+        }
+      };
+
+      animate();
+    });
+  }, []);
+
+  // Advance to next frame with double-buffering
+  const advanceFrame = useCallback(async () => {
+    if (!map.current || !layersReady || radarMode === 'OFF' || frames.length === 0) return;
+
+    const state = bufferStateRef.current;
+    if (state.isTransitioning) return; // Don't advance while transitioning
+
+    const nextFrameIndex = (currentFrameIndex + 1) % FRAME_COUNT;
+    const modePrefix = radarMode.toLowerCase();
+
+    // Determine which buffer to show next
+    const nextBuffer = state.activeBuffer === 'A' ? 'B' : 'A';
+    const currentBuffer = state.activeBuffer;
+
+    const showSourceId = `${modePrefix}-source-${nextBuffer}`;
+    const showLayerId = `${modePrefix}-layer-${nextBuffer}`;
+    const hideLayerId = `${modePrefix}-layer-${currentBuffer}`;
+
+    // Update the hidden buffer's source to the next frame
+    const nextUrl = getTileUrl(nextFrameIndex, radarMode);
+    if (!nextUrl) return;
+
+    state.isTransitioning = true;
+    updateSourceTiles(showSourceId, nextUrl);
+
+    // Wait for the new tiles to load
+    await waitForSourceLoad(showSourceId, 2000);
+
+    // Crossfade
+    await crossfade(showLayerId, hideLayerId, CROSSFADE_DURATION_MS);
+
+    // Update state
+    if (nextBuffer === 'A') {
+      state.bufferAFrameIndex = nextFrameIndex;
+    } else {
+      state.bufferBFrameIndex = nextFrameIndex;
+    }
+    state.activeBuffer = nextBuffer;
+    state.isTransitioning = false;
+
+    setCurrentFrameIndex(nextFrameIndex);
+  }, [layersReady, radarMode, frames, currentFrameIndex, getTileUrl, updateSourceTiles, waitForSourceLoad, crossfade]);
+
+  // Animation loop using requestAnimationFrame
   useEffect(() => {
-    if (!isPlaying || radarMode === 'OFF' || (!radarLayersReady && !ptypeLayersReady)) {
+    if (!isPlaying || radarMode === 'OFF' || !layersReady) {
       if (animationRef.current) {
-        clearInterval(animationRef.current);
+        cancelAnimationFrame(animationRef.current);
         animationRef.current = null;
       }
       return;
     }
 
-    animationRef.current = setInterval(() => {
-      setCurrentFrameIndex(prev => (prev + 1) % FRAME_COUNT);
-    }, ANIMATION_SPEED_MS);
+    const animate = (timestamp: number) => {
+      if (!lastFrameTimeRef.current) {
+        lastFrameTimeRef.current = timestamp;
+      }
+
+      const elapsed = timestamp - lastFrameTimeRef.current;
+
+      if (elapsed >= ANIMATION_SPEED_MS && !bufferStateRef.current.isTransitioning) {
+        lastFrameTimeRef.current = timestamp;
+        advanceFrame();
+      }
+
+      animationRef.current = requestAnimationFrame(animate);
+    };
+
+    animationRef.current = requestAnimationFrame(animate);
 
     return () => {
       if (animationRef.current) {
-        clearInterval(animationRef.current);
+        cancelAnimationFrame(animationRef.current);
         animationRef.current = null;
       }
     };
-  }, [isPlaying, radarMode, radarLayersReady, ptypeLayersReady]);
+  }, [isPlaying, radarMode, layersReady, advanceFrame]);
+
+  // Update layer visibility when mode changes
+  useEffect(() => {
+    if (!mapLoaded || !map.current || !layersReady) return;
+
+    const m = map.current;
+    const modes = ['radar', 'ptype'] as const;
+    const buffers = ['A', 'B'] as const;
+
+    for (const mode of modes) {
+      for (const buffer of buffers) {
+        const layerId = `${mode}-layer-${buffer}`;
+        if (m.getLayer(layerId)) {
+          if (radarMode === 'OFF') {
+            m.setPaintProperty(layerId, 'raster-opacity', 0);
+          } else if (mode === radarMode.toLowerCase()) {
+            // Show active buffer at full opacity, hide other
+            const isActive = buffer === bufferStateRef.current.activeBuffer;
+            m.setPaintProperty(layerId, 'raster-opacity', isActive ? RADAR_OPACITY : 0);
+          } else {
+            // Hide layers for other mode
+            m.setPaintProperty(layerId, 'raster-opacity', 0);
+          }
+        }
+      }
+    }
+  }, [mapLoaded, layersReady, radarMode]);
+
+  // Handle mode change - reset buffers
+  const handleModeChange = useCallback((mode: RadarMode) => {
+    if (!map.current || frames.length === 0) return;
+
+    const m = map.current;
+    const newFrameIndex = FRAME_COUNT - 1;
+
+    // Hide all layers first
+    const modes = ['radar', 'ptype'] as const;
+    const buffers = ['A', 'B'] as const;
+    for (const md of modes) {
+      for (const buffer of buffers) {
+        const layerId = `${md}-layer-${buffer}`;
+        if (m.getLayer(layerId)) {
+          m.setPaintProperty(layerId, 'raster-opacity', 0);
+        }
+      }
+    }
+
+    if (mode !== 'OFF') {
+      const modePrefix = mode.toLowerCase();
+
+      // Update buffer A with newest frame
+      const url = getTileUrl(newFrameIndex, mode);
+      if (url) {
+        updateSourceTiles(`${modePrefix}-source-A`, url);
+      }
+
+      // Show buffer A
+      const layerId = `${modePrefix}-layer-A`;
+      if (m.getLayer(layerId)) {
+        m.setPaintProperty(layerId, 'raster-opacity', RADAR_OPACITY);
+      }
+
+      // Reset buffer state
+      bufferStateRef.current = {
+        activeBuffer: 'A',
+        bufferAFrameIndex: newFrameIndex,
+        bufferBFrameIndex: 0,
+        isTransitioning: false,
+      };
+    }
+
+    setRadarMode(mode);
+    setCurrentFrameIndex(newFrameIndex);
+    setIsPlaying(true);
+    lastFrameTimeRef.current = 0;
+  }, [frames, getTileUrl, updateSourceTiles]);
+
+  // Handle slider change
+  const handleSliderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!map.current || frames.length === 0 || radarMode === 'OFF') return;
+
+    const newIndex = parseInt(e.target.value, 10);
+    const m = map.current;
+    const modePrefix = radarMode.toLowerCase();
+
+    setIsPlaying(false);
+
+    // Update buffer A with selected frame
+    const url = getTileUrl(newIndex, radarMode);
+    if (url) {
+      updateSourceTiles(`${modePrefix}-source-A`, url);
+    }
+
+    // Show buffer A, hide buffer B
+    if (m.getLayer(`${modePrefix}-layer-A`)) {
+      m.setPaintProperty(`${modePrefix}-layer-A`, 'raster-opacity', RADAR_OPACITY);
+    }
+    if (m.getLayer(`${modePrefix}-layer-B`)) {
+      m.setPaintProperty(`${modePrefix}-layer-B`, 'raster-opacity', 0);
+    }
+
+    bufferStateRef.current = {
+      activeBuffer: 'A',
+      bufferAFrameIndex: newIndex,
+      bufferBFrameIndex: 0,
+      isTransitioning: false,
+    };
+
+    setCurrentFrameIndex(newIndex);
+  }, [frames, radarMode, getTileUrl, updateSourceTiles]);
 
   // Radar controls
   const handlePlayPause = useCallback(() => {
     setIsPlaying(prev => !prev);
-  }, []);
-
-  const handleSliderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    setIsPlaying(false);
-    setCurrentFrameIndex(parseInt(e.target.value, 10));
-  }, []);
-
-  // Mode toggle with mutual exclusion
-  const setMode = useCallback((mode: RadarMode) => {
-    setRadarMode(mode);
-    // Reset to newest frame when switching modes
-    setCurrentFrameIndex(FRAME_COUNT - 1);
-    setIsPlaying(true);
+    lastFrameTimeRef.current = 0;
   }, []);
 
   // Add/update alert layers
@@ -622,27 +852,29 @@ export default function AlertsMapClient({
       const firstSymbolId = getFirstSymbolLayerId();
       if (!firstSymbolId) return;
 
+      const m = map.current;
+      const modes = ['radar', 'ptype'] as const;
+      const buffers = ['A', 'B'] as const;
+
       // Move radar layers
-      frames.forEach((_, index) => {
-        const radarLayerId = `radar-layer-${index}`;
-        const ptypeLayerId = `ptype-layer-${index}`;
-        if (map.current?.getLayer(radarLayerId)) {
-          map.current.moveLayer(radarLayerId, firstSymbolId);
+      for (const mode of modes) {
+        for (const buffer of buffers) {
+          const layerId = `${mode}-layer-${buffer}`;
+          if (m.getLayer(layerId)) {
+            m.moveLayer(layerId, firstSymbolId);
+          }
         }
-        if (map.current?.getLayer(ptypeLayerId)) {
-          map.current.moveLayer(ptypeLayerId, firstSymbolId);
-        }
-      });
+      }
 
       // Move alert layers
-      if (map.current.getLayer('alert-polygons-fill')) {
-        map.current.moveLayer('alert-polygons-fill', firstSymbolId);
+      if (m.getLayer('alert-polygons-fill')) {
+        m.moveLayer('alert-polygons-fill', firstSymbolId);
       }
-      if (map.current.getLayer('alert-polygons-stroke')) {
-        map.current.moveLayer('alert-polygons-stroke', firstSymbolId);
+      if (m.getLayer('alert-polygons-stroke')) {
+        m.moveLayer('alert-polygons-stroke', firstSymbolId);
       }
-      if (map.current.getLayer('alert-lines')) {
-        map.current.moveLayer('alert-lines', firstSymbolId);
+      if (m.getLayer('alert-lines')) {
+        m.moveLayer('alert-lines', firstSymbolId);
       }
     };
 
@@ -651,7 +883,7 @@ export default function AlertsMapClient({
     return () => {
       map.current?.off('styledata', handleStyleData);
     };
-  }, [getFirstSymbolLayerId, frames]);
+  }, [getFirstSymbolLayerId]);
 
   // Handle selection state
   useEffect(() => {
@@ -891,7 +1123,6 @@ export default function AlertsMapClient({
   }, [alerts]);
 
   const currentFrameLabel = frames[currentFrameIndex]?.localLabel || '';
-  const layersReady = radarMode === 'RADAR' ? radarLayersReady : radarMode === 'PTYPE' ? ptypeLayersReady : false;
 
   return (
     <div className="relative w-full rounded-xl overflow-hidden border border-white/10" style={{ height }}>
@@ -934,7 +1165,7 @@ export default function AlertsMapClient({
           {/* Mode toggle buttons */}
           <div className="flex-1 flex rounded-md overflow-hidden border border-white/10">
             <button
-              onClick={() => setMode('RADAR')}
+              onClick={() => handleModeChange('RADAR')}
               className={`flex-1 px-2 py-1 text-[10px] font-medium transition-colors ${
                 radarMode === 'RADAR'
                   ? 'bg-green-500/30 text-green-400'
@@ -944,7 +1175,7 @@ export default function AlertsMapClient({
               RADAR
             </button>
             <button
-              onClick={() => setMode('PTYPE')}
+              onClick={() => handleModeChange('PTYPE')}
               className={`flex-1 px-2 py-1 text-[10px] font-medium transition-colors ${
                 radarMode === 'PTYPE'
                   ? 'bg-purple-500/30 text-purple-400'
@@ -954,7 +1185,7 @@ export default function AlertsMapClient({
               P-TYPE
             </button>
             <button
-              onClick={() => setMode('OFF')}
+              onClick={() => handleModeChange('OFF')}
               className={`px-2 py-1 text-[10px] font-medium transition-colors ${
                 radarMode === 'OFF'
                   ? 'bg-white/10 text-mv-text-primary'
