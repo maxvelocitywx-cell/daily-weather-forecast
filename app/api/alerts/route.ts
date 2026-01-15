@@ -424,9 +424,9 @@ export async function GET() {
     alertsWithZones.sort((a, b) => compareAlerts(a.processed, b.processed));
 
     // Second pass: Fetch zone geometries for alerts without embedded geometry
-    // Limit to top 50 to keep response times reasonable
+    // Limit to top 200 to include lower-priority alerts like advisories/statements
     const alertsNeedingGeometry = alertsWithZones
-      .slice(0, 50)
+      .slice(0, 200)
       .filter(a => !a.processed.hasGeometry && a.affectedZones && a.affectedZones.length > 0);
 
     // Fetch zone geometries in parallel (batched)
