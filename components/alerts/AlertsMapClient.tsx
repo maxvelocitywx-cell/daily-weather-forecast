@@ -12,7 +12,7 @@ mapboxgl.accessToken = MAPBOX_TOKEN;
 const FRAME_COUNT = 25; // 25 frames = 120 minutes at 5-min intervals
 const FRAME_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
 const ANIMATION_SPEED_MS = 300; // Fast loop ~300ms per frame
-const RADAR_OPACITY = 0.65;
+const RADAR_OPACITY = 0.95;
 
 // NOAA MRMS ImageServer base URL (base reflectivity)
 const MRMS_BASE_URL = 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/radar/radar_base_reflectivity_time/ImageServer';
