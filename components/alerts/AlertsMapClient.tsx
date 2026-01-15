@@ -285,7 +285,7 @@ export default function AlertsMapClient({
 
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: 'mapbox://styles/maxvelocity/cmkew9qqf003y01rxdwxp37k4',
       center: [-98.5, 39.8],
       zoom: 3.5,
       minZoom: 2,
