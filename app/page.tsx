@@ -14,6 +14,7 @@ import { NDFDRecordsMap } from '@/components/NDFDRecordsMap';
 import WeatherAlerts from '@/components/WeatherAlerts';
 import { SoundingsTab } from '@/components/soundings/SoundingsTab';
 import HeadlinesList from '@/components/headlines/HeadlinesList';
+import Link from 'next/link';
 
 type TabId = 'headlines' | 'alerts' | 'forecast' | 'records' | 'soundings';
 
@@ -109,6 +110,13 @@ export default function HomePage() {
           >
             Soundings
           </button>
+          <Link
+            href="/models"
+            className="px-4 py-2 rounded-md text-sm font-medium transition-all text-mv-text-muted hover:text-mv-text-primary hover:bg-white/5 flex items-center gap-2"
+          >
+            <span className="text-base">🌐</span>
+            Models
+          </Link>
         </div>
       </div>
 
