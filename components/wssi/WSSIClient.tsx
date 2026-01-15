@@ -184,7 +184,7 @@ export default function WSSIClient() {
         },
       }, firstSymbolId);
 
-      // Halo outline layer (below main outline) - white glow effect
+      // Halo outline layer (below main outline) - white glow effect for organic look
       m.addLayer({
         id: haloLayerId,
         type: 'line',
@@ -195,8 +195,8 @@ export default function WSSIClient() {
           'line-cap': 'round',
         },
         paint: {
-          'line-color': 'rgba(255, 255, 255, 0.35)',
-          'line-width': 4,
+          'line-color': 'rgba(255, 255, 255, 0.32)',
+          'line-width': 5, // Wider halo for smoother appearance
           'line-opacity': 1.0,
         },
       }, firstSymbolId);
@@ -214,7 +214,7 @@ export default function WSSIClient() {
         paint: {
           'line-color': risk.color,
           'line-width': 2,
-          'line-opacity': 0.95,
+          'line-opacity': 0.9,
         },
       }, firstSymbolId);
     }

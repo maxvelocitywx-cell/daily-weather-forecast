@@ -100,26 +100,34 @@ function extractCategory(properties: Record<string, unknown>): WSSICategory | nu
   return null;
 }
 
+// Type alias for polygon features
+type PolygonFeature = Feature<Polygon | MultiPolygon>;
+
 /**
- * Chaikin smoothing algorithm
+ * Chaikin smoothing algorithm - rounds corners while preserving shape
+ * @param coords - Ring coordinates
+ * @param iterations - Number of smoothing passes (2-3 recommended)
  */
-function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
-  if (coords.length < 3) return coords;
+function chaikinSmooth(coords: number[][], iterations: number = 3): number[][] {
+  if (coords.length < 4) return coords;
 
   let result = [...coords];
 
   for (let iter = 0; iter < iterations; iter++) {
     const smoothed: number[][] = [];
 
+    // Process all segments except the closing one
     for (let i = 0; i < result.length - 1; i++) {
       const p0 = result[i];
       const p1 = result[i + 1];
 
+      // Q point: 75% toward p0, 25% toward p1
       const q = [
         0.75 * p0[0] + 0.25 * p1[0],
         0.75 * p0[1] + 0.25 * p1[1],
       ];
 
+      // R point: 25% toward p0, 75% toward p1
       const r = [
         0.25 * p0[0] + 0.75 * p1[0],
         0.25 * p0[1] + 0.75 * p1[1],
@@ -128,8 +136,9 @@ function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
       smoothed.push(q, r);
     }
 
+    // Close the ring
     if (smoothed.length > 0) {
-      smoothed.push(smoothed[0]);
+      smoothed.push([smoothed[0][0], smoothed[0][1]]);
     }
 
     result = smoothed;
@@ -139,34 +148,109 @@ function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
 }
 
 /**
- * Apply smoothing to polygon coordinates
+ * Apply Chaikin smoothing to all rings in a polygon
  */
-function smoothPolygonCoords(rings: number[][][]): number[][][] {
-  return rings.map(ring => chaikinSmooth(ring, 2));
+function smoothPolygonCoords(rings: number[][][], iterations: number = 3): number[][][] {
+  return rings.map(ring => chaikinSmooth(ring, iterations));
 }
 
 /**
- * Smooth a GeoJSON geometry
+ * Apply Chaikin smoothing to a GeoJSON geometry
  */
-function smoothGeometry(geometry: Geometry): Geometry {
+function applyChaikinSmoothing(geometry: Geometry, iterations: number = 3): Geometry {
   if (geometry.type === 'Polygon') {
     return {
       type: 'Polygon',
-      coordinates: smoothPolygonCoords(geometry.coordinates as number[][][]),
+      coordinates: smoothPolygonCoords(geometry.coordinates as number[][][], iterations),
     };
   } else if (geometry.type === 'MultiPolygon') {
     return {
       type: 'MultiPolygon',
       coordinates: (geometry.coordinates as number[][][][]).map(polygon =>
-        smoothPolygonCoords(polygon)
+        smoothPolygonCoords(polygon, iterations)
       ),
     };
   }
   return geometry;
 }
 
-// Type alias for polygon features
-type PolygonFeature = Feature<Polygon | MultiPolygon>;
+/**
+ * Full smoothing pipeline for organic, rounded shapes:
+ * 1. Light simplification to remove grid stair-steps
+ * 2. Chaikin smoothing (2-3 iterations) to round corners
+ * 3. Buffer OUT then IN (critical for circular curvature)
+ * 4. Final Chaikin pass to clean up buffer artifacts
+ */
+function smoothGeometryFull(feature: PolygonFeature): PolygonFeature | null {
+  try {
+    let current = feature;
+
+    // Step 1: Light simplification to remove grid artifacts
+    try {
+      const simplified = turf.simplify(current, {
+        tolerance: 0.02, // ~2km at mid-latitudes
+        highQuality: true, // Topology-preserving
+      });
+      if (simplified && simplified.geometry) {
+        current = simplified as PolygonFeature;
+      }
+    } catch (e) {
+      console.log('[WSSI] Simplify failed, continuing with original');
+    }
+
+    // Step 2: First Chaikin pass (3 iterations)
+    if (current.geometry) {
+      current = {
+        ...current,
+        geometry: applyChaikinSmoothing(current.geometry, 3) as Polygon | MultiPolygon,
+      };
+    }
+
+    // Step 3: Buffer OUT then IN for circular curvature
+    // Buffer distance in kilometers (converted to degrees roughly)
+    const bufferDistanceKm = 15; // ~15km buffer
+
+    try {
+      // Buffer outward
+      const bufferedOut = turf.buffer(current, bufferDistanceKm, { units: 'kilometers' });
+      if (bufferedOut && bufferedOut.geometry) {
+        // Buffer inward by same distance
+        const bufferedIn = turf.buffer(bufferedOut, -bufferDistanceKm, { units: 'kilometers' });
+        if (bufferedIn && bufferedIn.geometry) {
+          current = bufferedIn as PolygonFeature;
+        }
+      }
+    } catch (e) {
+      console.log('[WSSI] Buffer rounding failed, using Chaikin-only result');
+    }
+
+    // Step 4: Final Chaikin pass (1 iteration) to clean buffer artifacts
+    if (current.geometry) {
+      current = {
+        ...current,
+        geometry: applyChaikinSmoothing(current.geometry, 1) as Polygon | MultiPolygon,
+      };
+    }
+
+    // Final simplification to reduce point count
+    try {
+      const finalSimplified = turf.simplify(current, {
+        tolerance: 0.005, // Light final simplification
+        highQuality: false,
+      });
+      if (finalSimplified && finalSimplified.geometry) {
+        current = finalSimplified as PolygonFeature;
+      }
+    } catch {
+      // Keep current if simplify fails
+    }
+
+    return current;
+  } catch (err) {
+    console.error('[WSSI] Full smoothing failed:', err);
+    return feature; // Return original on failure
+  }
+}
 
 /**
  * Union all features in an array into a single MultiPolygon
@@ -338,26 +422,25 @@ async function processWSSIData(day: number): Promise<{ geojson: FeatureCollectio
     }
 
     try {
-      // Simplify geometry (skip expensive buffer/smoothing for serverless perf)
-      let processed: PolygonFeature;
-      try {
-        processed = turf.simplify(band, {
-          tolerance: 0.01, // Slightly more aggressive simplification
-          highQuality: false, // Faster
-        }) as PolygonFeature;
-      } catch {
-        // If simplify fails, use original
-        processed = band;
-      }
+      // Apply full smoothing pipeline for organic, rounded shapes
+      // This includes: simplify -> Chaikin -> buffer out/in -> final Chaikin
+      const smoothed = smoothGeometryFull(band);
 
-      // Validate simplified geometry still has area
-      if (!processed.geometry) {
-        console.log(`[WSSI] Skipping ${category} - simplify produced null geometry`);
+      if (!smoothed || !smoothed.geometry) {
+        console.log(`[WSSI] Skipping ${category} - smoothing produced null geometry`);
         continue;
       }
 
-      // Use simplified geometry directly (skip expensive buffer/Chaikin for serverless)
-      const finalGeometry = processed.geometry;
+      // Validate smoothed geometry still has area
+      try {
+        const smoothedArea = turf.area(smoothed);
+        if (smoothedArea < 500000) { // Less than 0.5 km² after smoothing
+          console.log(`[WSSI] Skipping ${category} - smoothed area too small: ${smoothedArea / 1000000} km²`);
+          continue;
+        }
+      } catch {
+        // Continue if area check fails
+      }
 
       const riskLabel = WSSI_TO_RISK[category];
       const originalCategory = WSSI_CATEGORY_LABELS[category];
@@ -366,7 +449,7 @@ async function processWSSIData(day: number): Promise<{ geojson: FeatureCollectio
 
       processedFeatures.push({
         type: 'Feature',
-        geometry: finalGeometry,
+        geometry: smoothed.geometry,
         properties: {
           day,
           category,
