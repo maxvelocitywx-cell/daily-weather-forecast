@@ -3,28 +3,22 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { Maximize2, Play, Pause, SkipBack, SkipForward } from 'lucide-react';
+import { Maximize2, Play, Pause } from 'lucide-react';
 
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
 
-// MRMS Base Reflectivity Radar Animation Config
-const RADAR_FRAME_COUNT = 13; // 13 frames = 60 minutes at 5-min intervals
-const RADAR_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
-const ANIMATION_SPEED_MS = 700; // Time between frames when playing
+// Unified Radar Animation Config (both modes use same timing)
+const FRAME_COUNT = 25; // 25 frames = 120 minutes at 5-min intervals
+const FRAME_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
+const ANIMATION_SPEED_MS = 300; // Fast loop ~300ms per frame
 const RADAR_OPACITY = 0.65;
 
 // NOAA MRMS ImageServer base URL (base reflectivity)
 const MRMS_BASE_URL = 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/radar/radar_base_reflectivity_time/ImageServer';
 
-// MRMS Precipitation Type (p-type) Animation Config
-const PTYPE_FRAME_COUNT = 25; // 25 frames = 120 minutes at 5-min intervals
-const PTYPE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
-const PTYPE_ANIMATION_SPEED_MS = 750; // Time between frames when playing
-const PTYPE_OPACITY = 0.70;
-
-// NOAA OpenGeo WMS endpoint for CONUS precip type
-const PTYPE_WMS_BASE = 'https://opengeo.ncep.noaa.gov/geoserver/conus/conus_pcpn_typ/ows';
+// Radar mode type
+type RadarMode = 'RADAR' | 'PTYPE' | 'OFF';
 
 // Event-based color mapping (keyed by event string)
 const EVENT_COLORS: Record<string, string> = {
@@ -181,70 +175,40 @@ function getSeverityStyle(severity: string): { fillOpacity: number; lineWidth: n
   return SEVERITY_STYLE[severity] || SEVERITY_STYLE.Unknown;
 }
 
-// Generate radar frame timestamps (newest to oldest)
-function generateRadarFrames(): { timestamp: number; label: string }[] {
+// Generate frame timestamps (25 frames = 120 min at 5-min intervals)
+function generateFrames(): { timestamp: number; isoUtc: string; localLabel: string }[] {
   const now = Date.now();
   // Round down to nearest 5 minutes
-  const roundedNow = Math.floor(now / RADAR_INTERVAL_MS) * RADAR_INTERVAL_MS;
+  const roundedNow = Math.floor(now / FRAME_INTERVAL_MS) * FRAME_INTERVAL_MS;
 
-  const frames: { timestamp: number; label: string }[] = [];
-  for (let i = 0; i < RADAR_FRAME_COUNT; i++) {
-    const timestamp = roundedNow - (i * RADAR_INTERVAL_MS);
+  const frames: { timestamp: number; isoUtc: string; localLabel: string }[] = [];
+  for (let i = 0; i < FRAME_COUNT; i++) {
+    const timestamp = roundedNow - (i * FRAME_INTERVAL_MS);
     const date = new Date(timestamp);
-    const label = date.toLocaleTimeString('en-US', {
+    // ISO-8601 UTC format for API requests
+    const isoUtc = date.toISOString();
+    // Local time label
+    const localLabel = date.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      hour12: true
     });
-    frames.push({ timestamp, label });
+    frames.push({ timestamp, isoUtc, localLabel });
   }
 
   return frames.reverse(); // Oldest first, newest last
 }
 
-// Generate p-type frame timestamps (25 frames = 120 min at 5-min intervals)
-function generatePtypeFrames(): { timestamp: number; isoUtc: string; label: string }[] {
-  const now = Date.now();
-  // Round down to nearest 5 minutes
-  const roundedNow = Math.floor(now / PTYPE_INTERVAL_MS) * PTYPE_INTERVAL_MS;
-
-  const frames: { timestamp: number; isoUtc: string; label: string }[] = [];
-  for (let i = 0; i < PTYPE_FRAME_COUNT; i++) {
-    const timestamp = roundedNow - (i * PTYPE_INTERVAL_MS);
-    const date = new Date(timestamp);
-    // ISO-8601 UTC format for WMS time parameter
-    const isoUtc = date.toISOString().replace('.000Z', 'Z');
-    // Short label: HH:MMZ
-    const label = `${date.getUTCHours().toString().padStart(2, '0')}:${date.getUTCMinutes().toString().padStart(2, '0')}Z`;
-    frames.push({ timestamp, isoUtc, label });
-  }
-
-  return frames.reverse(); // Oldest first, newest last
-}
-
-// Build MRMS tile URL for a specific timestamp (base reflectivity)
+// Build MRMS reflectivity tile URL for a specific timestamp
 function buildRadarTileUrl(timestamp: number): string {
-  // Use WMS export endpoint with time parameter
-  // Format: exportImage with bbox from tile coordinates
   return `${MRMS_BASE_URL}/exportImage?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&time=${timestamp}&f=image`;
 }
 
-// Build p-type WMS tile URL for a specific timestamp
+// Build P-TYPE tile URL (server-side composited)
 function buildPtypeTileUrl(isoUtc: string): string {
-  const params = new URLSearchParams({
-    service: 'WMS',
-    request: 'GetMap',
-    version: '1.1.1',
-    layers: 'conus_pcpn_typ',
-    styles: '',
-    format: 'image/png',
-    transparent: 'true',
-    srs: 'EPSG:3857',
-    width: '256',
-    height: '256',
-    time: isoUtc
-  });
-  return `${PTYPE_WMS_BASE}?${params.toString()}&bbox={bbox-epsg-3857}`;
+  // Use our server-side tile endpoint that composites reflectivity + p-type
+  return `/api/tiles/ptype/{z}/{x}/{y}.png?time=${encodeURIComponent(isoUtc)}`;
 }
 
 export interface AlertGeometry {
@@ -316,31 +280,21 @@ export default function AlertsMapClient({
   const [mapLoaded, setMapLoaded] = useState(false);
   const [legendExpanded, setLegendExpanded] = useState(false);
 
-  // Radar animation state (base reflectivity)
-  const [radarEnabled, setRadarEnabled] = useState(true);
-  const [radarPlaying, setRadarPlaying] = useState(true);
-  const [currentFrameIndex, setCurrentFrameIndex] = useState(RADAR_FRAME_COUNT - 1); // Start at newest
-  const [radarFrames, setRadarFrames] = useState<{ timestamp: number; label: string }[]>([]);
+  // Unified radar state
+  const [radarMode, setRadarMode] = useState<RadarMode>('RADAR');
+  const [isPlaying, setIsPlaying] = useState(true);
+  const [currentFrameIndex, setCurrentFrameIndex] = useState(FRAME_COUNT - 1); // Start at newest
+  const [frames, setFrames] = useState<{ timestamp: number; isoUtc: string; localLabel: string }[]>([]);
   const [radarLayersReady, setRadarLayersReady] = useState(false);
-
-  // P-type radar animation state
-  const [ptypeEnabled, setPtypeEnabled] = useState(false);
-  const [ptypePlaying, setPtypePlaying] = useState(true);
-  const [currentPtypeFrameIndex, setCurrentPtypeFrameIndex] = useState(PTYPE_FRAME_COUNT - 1); // Start at newest
-  const [ptypeFrames, setPtypeFrames] = useState<{ timestamp: number; isoUtc: string; label: string }[]>([]);
   const [ptypeLayersReady, setPtypeLayersReady] = useState(false);
-  const ptypeAnimationRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Generate radar frames on mount
+  // Generate frames on mount and refresh every 5 minutes
   useEffect(() => {
-    setRadarFrames(generateRadarFrames());
-    setPtypeFrames(generatePtypeFrames());
+    setFrames(generateFrames());
 
-    // Refresh frames every 5 minutes
     const refreshInterval = setInterval(() => {
-      setRadarFrames(generateRadarFrames());
-      setPtypeFrames(generatePtypeFrames());
-    }, RADAR_INTERVAL_MS);
+      setFrames(generateFrames());
+    }, FRAME_INTERVAL_MS);
 
     return () => clearInterval(refreshInterval);
   }, []);
@@ -427,9 +381,6 @@ export default function AlertsMapClient({
       if (animationRef.current) {
         clearInterval(animationRef.current);
       }
-      if (ptypeAnimationRef.current) {
-        clearInterval(ptypeAnimationRef.current);
-      }
       map.current?.remove();
       map.current = null;
     };
@@ -444,14 +395,14 @@ export default function AlertsMapClient({
     return firstSymbol?.id;
   }, []);
 
-  // Add radar layers (one per frame, all hidden initially except the current one)
+  // Add RADAR layers (one per frame)
   useEffect(() => {
-    if (!mapLoaded || !map.current || radarFrames.length === 0) return;
+    if (!mapLoaded || !map.current || frames.length === 0) return;
 
     const firstSymbolId = getFirstSymbolLayerId();
 
     // Add radar sources and layers for each frame
-    radarFrames.forEach((frame, index) => {
+    frames.forEach((frame, index) => {
       const sourceId = `radar-source-${index}`;
       const layerId = `radar-layer-${index}`;
 
@@ -468,24 +419,24 @@ export default function AlertsMapClient({
           type: 'raster',
           source: sourceId,
           paint: {
-            'raster-opacity': index === currentFrameIndex && radarEnabled ? RADAR_OPACITY : 0,
+            'raster-opacity': 0,
             'raster-fade-duration': 0
           }
-        }, firstSymbolId); // Insert below labels
+        }, firstSymbolId);
       }
     });
 
     setRadarLayersReady(true);
-  }, [mapLoaded, radarFrames, getFirstSymbolLayerId]);
+  }, [mapLoaded, frames, getFirstSymbolLayerId]);
 
-  // Add p-type radar layers (one per frame)
+  // Add P-TYPE layers (one per frame)
   useEffect(() => {
-    if (!mapLoaded || !map.current || ptypeFrames.length === 0) return;
+    if (!mapLoaded || !map.current || frames.length === 0) return;
 
     const firstSymbolId = getFirstSymbolLayerId();
 
     // Add p-type sources and layers for each frame
-    ptypeFrames.forEach((frame, index) => {
+    frames.forEach((frame, index) => {
       const sourceId = `ptype-source-${index}`;
       const layerId = `ptype-layer-${index}`;
 
@@ -502,51 +453,46 @@ export default function AlertsMapClient({
           type: 'raster',
           source: sourceId,
           paint: {
-            'raster-opacity': index === currentPtypeFrameIndex && ptypeEnabled ? PTYPE_OPACITY : 0,
+            'raster-opacity': 0,
             'raster-fade-duration': 0
           }
-        }, firstSymbolId); // Insert below labels
+        }, firstSymbolId);
       }
     });
 
     setPtypeLayersReady(true);
-  }, [mapLoaded, ptypeFrames, getFirstSymbolLayerId]);
+  }, [mapLoaded, frames, getFirstSymbolLayerId]);
 
-  // Update radar layer visibility when frame changes
+  // Update layer visibility based on mode and current frame
   useEffect(() => {
-    if (!mapLoaded || !map.current || !radarLayersReady) return;
+    if (!mapLoaded || !map.current) return;
 
-    radarFrames.forEach((_, index) => {
-      const layerId = `radar-layer-${index}`;
-      if (map.current?.getLayer(layerId)) {
-        map.current.setPaintProperty(
-          layerId,
-          'raster-opacity',
-          index === currentFrameIndex && radarEnabled ? RADAR_OPACITY : 0
-        );
-      }
-    });
-  }, [mapLoaded, radarLayersReady, currentFrameIndex, radarEnabled, radarFrames]);
+    // Update RADAR layers
+    if (radarLayersReady) {
+      frames.forEach((_, index) => {
+        const layerId = `radar-layer-${index}`;
+        if (map.current?.getLayer(layerId)) {
+          const shouldShow = radarMode === 'RADAR' && index === currentFrameIndex;
+          map.current.setPaintProperty(layerId, 'raster-opacity', shouldShow ? RADAR_OPACITY : 0);
+        }
+      });
+    }
 
-  // Update p-type layer visibility when frame changes
+    // Update P-TYPE layers
+    if (ptypeLayersReady) {
+      frames.forEach((_, index) => {
+        const layerId = `ptype-layer-${index}`;
+        if (map.current?.getLayer(layerId)) {
+          const shouldShow = radarMode === 'PTYPE' && index === currentFrameIndex;
+          map.current.setPaintProperty(layerId, 'raster-opacity', shouldShow ? RADAR_OPACITY : 0);
+        }
+      });
+    }
+  }, [mapLoaded, radarLayersReady, ptypeLayersReady, radarMode, currentFrameIndex, frames]);
+
+  // Animation loop
   useEffect(() => {
-    if (!mapLoaded || !map.current || !ptypeLayersReady) return;
-
-    ptypeFrames.forEach((_, index) => {
-      const layerId = `ptype-layer-${index}`;
-      if (map.current?.getLayer(layerId)) {
-        map.current.setPaintProperty(
-          layerId,
-          'raster-opacity',
-          index === currentPtypeFrameIndex && ptypeEnabled ? PTYPE_OPACITY : 0
-        );
-      }
-    });
-  }, [mapLoaded, ptypeLayersReady, currentPtypeFrameIndex, ptypeEnabled, ptypeFrames]);
-
-  // Animation loop for base reflectivity radar
-  useEffect(() => {
-    if (!radarPlaying || !radarEnabled || !radarLayersReady) {
+    if (!isPlaying || radarMode === 'OFF' || (!radarLayersReady && !ptypeLayersReady)) {
       if (animationRef.current) {
         clearInterval(animationRef.current);
         animationRef.current = null;
@@ -555,7 +501,7 @@ export default function AlertsMapClient({
     }
 
     animationRef.current = setInterval(() => {
-      setCurrentFrameIndex(prev => (prev + 1) % RADAR_FRAME_COUNT);
+      setCurrentFrameIndex(prev => (prev + 1) % FRAME_COUNT);
     }, ANIMATION_SPEED_MS);
 
     return () => {
@@ -564,84 +510,30 @@ export default function AlertsMapClient({
         animationRef.current = null;
       }
     };
-  }, [radarPlaying, radarEnabled, radarLayersReady]);
+  }, [isPlaying, radarMode, radarLayersReady, ptypeLayersReady]);
 
-  // Animation loop for p-type radar
-  useEffect(() => {
-    if (!ptypePlaying || !ptypeEnabled || !ptypeLayersReady) {
-      if (ptypeAnimationRef.current) {
-        clearInterval(ptypeAnimationRef.current);
-        ptypeAnimationRef.current = null;
-      }
-      return;
-    }
-
-    ptypeAnimationRef.current = setInterval(() => {
-      setCurrentPtypeFrameIndex(prev => (prev + 1) % PTYPE_FRAME_COUNT);
-    }, PTYPE_ANIMATION_SPEED_MS);
-
-    return () => {
-      if (ptypeAnimationRef.current) {
-        clearInterval(ptypeAnimationRef.current);
-        ptypeAnimationRef.current = null;
-      }
-    };
-  }, [ptypePlaying, ptypeEnabled, ptypeLayersReady]);
-
-  // Radar controls (base reflectivity)
+  // Radar controls
   const handlePlayPause = useCallback(() => {
-    setRadarPlaying(prev => !prev);
-  }, []);
-
-  const handleStepBack = useCallback(() => {
-    setRadarPlaying(false);
-    setCurrentFrameIndex(prev => (prev - 1 + RADAR_FRAME_COUNT) % RADAR_FRAME_COUNT);
-  }, []);
-
-  const handleStepForward = useCallback(() => {
-    setRadarPlaying(false);
-    setCurrentFrameIndex(prev => (prev + 1) % RADAR_FRAME_COUNT);
+    setIsPlaying(prev => !prev);
   }, []);
 
   const handleSliderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    setRadarPlaying(false);
+    setIsPlaying(false);
     setCurrentFrameIndex(parseInt(e.target.value, 10));
   }, []);
 
-  const toggleRadar = useCallback(() => {
-    setRadarEnabled(prev => !prev);
+  // Mode toggle with mutual exclusion
+  const setMode = useCallback((mode: RadarMode) => {
+    setRadarMode(mode);
+    // Reset to newest frame when switching modes
+    setCurrentFrameIndex(FRAME_COUNT - 1);
+    setIsPlaying(true);
   }, []);
 
-  // P-type radar controls
-  const handlePtypePlayPause = useCallback(() => {
-    setPtypePlaying(prev => !prev);
-  }, []);
-
-  const handlePtypeStepBack = useCallback(() => {
-    setPtypePlaying(false);
-    setCurrentPtypeFrameIndex(prev => (prev - 1 + PTYPE_FRAME_COUNT) % PTYPE_FRAME_COUNT);
-  }, []);
-
-  const handlePtypeStepForward = useCallback(() => {
-    setPtypePlaying(false);
-    setCurrentPtypeFrameIndex(prev => (prev + 1) % PTYPE_FRAME_COUNT);
-  }, []);
-
-  const handlePtypeSliderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    setPtypePlaying(false);
-    setCurrentPtypeFrameIndex(parseInt(e.target.value, 10));
-  }, []);
-
-  const togglePtype = useCallback(() => {
-    setPtypeEnabled(prev => !prev);
-  }, []);
-
-  // Add/update alert layers - ONLY fill and line layers, NO point/circle/symbol layers
-  // All alert layers are inserted BELOW the first symbol layer so labels remain on top
+  // Add/update alert layers
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
 
-    // Find the first symbol layer to insert alerts below it
     const firstSymbolId = getFirstSymbolLayerId();
 
     // Add or update polygon source
@@ -654,7 +546,6 @@ export default function AlertsMapClient({
         data: polygonGeoJSON
       });
 
-      // Fill layer for polygons - insert BELOW first symbol layer
       map.current.addLayer({
         id: 'alert-polygons-fill',
         type: 'fill',
@@ -672,7 +563,6 @@ export default function AlertsMapClient({
         }
       }, firstSymbolId);
 
-      // Stroke layer for polygons (100% opacity) - insert BELOW first symbol layer
       map.current.addLayer({
         id: 'alert-polygons-stroke',
         type: 'line',
@@ -692,7 +582,7 @@ export default function AlertsMapClient({
       }, firstSymbolId);
     }
 
-    // Add or update line source (for LineString geometries)
+    // Add or update line source
     const lineSource = map.current.getSource('alert-lines') as mapboxgl.GeoJSONSource;
     if (lineSource) {
       lineSource.setData(lineGeoJSON);
@@ -702,7 +592,6 @@ export default function AlertsMapClient({
         data: lineGeoJSON
       });
 
-      // Line layer (outline only, no fill) - insert BELOW first symbol layer
       map.current.addLayer({
         id: 'alert-lines',
         type: 'line',
@@ -733,23 +622,19 @@ export default function AlertsMapClient({
       const firstSymbolId = getFirstSymbolLayerId();
       if (!firstSymbolId) return;
 
-      // Move radar layers below the first symbol layer
-      radarFrames.forEach((_, index) => {
-        const layerId = `radar-layer-${index}`;
-        if (map.current?.getLayer(layerId)) {
-          map.current.moveLayer(layerId, firstSymbolId);
+      // Move radar layers
+      frames.forEach((_, index) => {
+        const radarLayerId = `radar-layer-${index}`;
+        const ptypeLayerId = `ptype-layer-${index}`;
+        if (map.current?.getLayer(radarLayerId)) {
+          map.current.moveLayer(radarLayerId, firstSymbolId);
+        }
+        if (map.current?.getLayer(ptypeLayerId)) {
+          map.current.moveLayer(ptypeLayerId, firstSymbolId);
         }
       });
 
-      // Move p-type layers below the first symbol layer
-      ptypeFrames.forEach((_, index) => {
-        const layerId = `ptype-layer-${index}`;
-        if (map.current?.getLayer(layerId)) {
-          map.current.moveLayer(layerId, firstSymbolId);
-        }
-      });
-
-      // Move alert layers below the first symbol layer if they exist
+      // Move alert layers
       if (map.current.getLayer('alert-polygons-fill')) {
         map.current.moveLayer('alert-polygons-fill', firstSymbolId);
       }
@@ -766,13 +651,12 @@ export default function AlertsMapClient({
     return () => {
       map.current?.off('styledata', handleStyleData);
     };
-  }, [getFirstSymbolLayerId, radarFrames, ptypeFrames]);
+  }, [getFirstSymbolLayerId, frames]);
 
   // Handle selection state
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
 
-    // Clear all selected states first
     alerts.forEach(alert => {
       if (alert.hasGeometry) {
         map.current?.setFeatureState(
@@ -786,7 +670,6 @@ export default function AlertsMapClient({
       }
     });
 
-    // Set selected state
     if (selectedAlertId) {
       map.current.setFeatureState(
         { source: 'alert-polygons', id: selectedAlertId },
@@ -922,17 +805,14 @@ export default function AlertsMapClient({
       e.originalEvent.stopPropagation();
     };
 
-    // Add listeners for polygon fill
     map.current.on('mouseenter', 'alert-polygons-fill', (e) => handleMouseEnter(e, 'alert-polygons'));
     map.current.on('mouseleave', 'alert-polygons-fill', handleMouseLeave);
     map.current.on('click', 'alert-polygons-fill', handleClick);
 
-    // Add listeners for lines
     map.current.on('mouseenter', 'alert-lines', (e) => handleMouseEnter(e, 'alert-lines'));
     map.current.on('mouseleave', 'alert-lines', handleMouseLeave);
     map.current.on('click', 'alert-lines', handleClick);
 
-    // Click on map background to deselect
     map.current.on('click', (e) => {
       const features = map.current?.queryRenderedFeatures(e.point, {
         layers: ['alert-polygons-fill', 'alert-lines']
@@ -972,7 +852,6 @@ export default function AlertsMapClient({
     }
   }, [alerts]);
 
-  // Expose flyToAlert externally
   useEffect(() => {
     if (selectedAlertId) {
       flyToAlert(selectedAlertId);
@@ -1003,7 +882,6 @@ export default function AlertsMapClient({
         duration: 1000
       });
     } else {
-      // Default to CONUS view
       map.current.flyTo({
         center: [-98.5, 39.8],
         zoom: 3.5,
@@ -1012,8 +890,8 @@ export default function AlertsMapClient({
     }
   }, [alerts]);
 
-  const currentFrameLabel = radarFrames[currentFrameIndex]?.label || '';
-  const currentPtypeFrameLabel = ptypeFrames[currentPtypeFrameIndex]?.label || '';
+  const currentFrameLabel = frames[currentFrameIndex]?.localLabel || '';
+  const layersReady = radarMode === 'RADAR' ? radarLayersReady : radarMode === 'PTYPE' ? ptypeLayersReady : false;
 
   return (
     <div className="relative w-full rounded-xl overflow-hidden border border-white/10" style={{ height }}>
@@ -1030,200 +908,126 @@ export default function AlertsMapClient({
           <Maximize2 size={14} className="text-mv-text-primary" />
           <span className="text-xs text-mv-text-secondary">Fit All</span>
         </button>
-
-        {/* Radar toggle */}
-        <button
-          onClick={toggleRadar}
-          className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
-            radarEnabled
-              ? 'bg-green-500/20 border-green-500/50 hover:border-green-500'
-              : 'bg-mv-bg-secondary/90 border-white/10 hover:border-white/20'
-          }`}
-          title={radarEnabled ? 'Hide radar' : 'Show radar'}
-        >
-          <div className={`w-2 h-2 rounded-full ${radarEnabled ? 'bg-green-500' : 'bg-gray-500'}`} />
-          <span className="text-xs text-mv-text-secondary">Radar</span>
-        </button>
-
-        {/* P-type toggle */}
-        <button
-          onClick={togglePtype}
-          className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
-            ptypeEnabled
-              ? 'bg-purple-500/20 border-purple-500/50 hover:border-purple-500'
-              : 'bg-mv-bg-secondary/90 border-white/10 hover:border-white/20'
-          }`}
-          title={ptypeEnabled ? 'Hide precip type' : 'Show precip type'}
-        >
-          <div className={`w-2 h-2 rounded-full ${ptypeEnabled ? 'bg-purple-500' : 'bg-gray-500'}`} />
-          <span className="text-xs text-mv-text-secondary">P-Type</span>
-        </button>
       </div>
 
-      {/* Radar animation controls */}
-      {radarEnabled && radarLayersReady && (
-        <div className="absolute bottom-16 left-3 right-3 sm:left-3 sm:right-auto sm:w-80 bg-mv-bg-secondary/95 backdrop-blur-sm rounded-lg border border-white/10 p-3 z-10">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-mv-text-primary">MRMS Radar</span>
-            <span className="text-xs text-cyan-400 font-mono">{currentFrameLabel}</span>
-          </div>
+      {/* Compact radar controls - bottom left */}
+      <div className="absolute bottom-3 left-3 bg-mv-bg-secondary/95 backdrop-blur-sm rounded-lg border border-white/10 p-2 z-10" style={{ width: '210px' }}>
+        {/* Row 1: Play/Pause + Mode toggle */}
+        <div className="flex items-center gap-2 mb-2">
+          <button
+            onClick={handlePlayPause}
+            className={`p-1.5 rounded-full transition-colors ${
+              radarMode !== 'OFF'
+                ? 'bg-cyan-500/20 hover:bg-cyan-500/30'
+                : 'bg-white/5 hover:bg-white/10'
+            }`}
+            title={isPlaying ? 'Pause' : 'Play'}
+            disabled={radarMode === 'OFF'}
+          >
+            {isPlaying && radarMode !== 'OFF' ? (
+              <Pause size={14} className="text-cyan-400" />
+            ) : (
+              <Play size={14} className={radarMode !== 'OFF' ? 'text-cyan-400 ml-0.5' : 'text-gray-500 ml-0.5'} />
+            )}
+          </button>
 
-          {/* Playback controls */}
-          <div className="flex items-center gap-2 mb-2">
+          {/* Mode toggle buttons */}
+          <div className="flex-1 flex rounded-md overflow-hidden border border-white/10">
             <button
-              onClick={handleStepBack}
-              className="p-1.5 rounded bg-white/5 hover:bg-white/10 transition-colors"
-              title="Step back"
+              onClick={() => setMode('RADAR')}
+              className={`flex-1 px-2 py-1 text-[10px] font-medium transition-colors ${
+                radarMode === 'RADAR'
+                  ? 'bg-green-500/30 text-green-400'
+                  : 'bg-transparent text-mv-text-muted hover:bg-white/5'
+              }`}
             >
-              <SkipBack size={14} className="text-mv-text-secondary" />
+              RADAR
             </button>
-
             <button
-              onClick={handlePlayPause}
-              className="p-2 rounded-full bg-cyan-500/20 hover:bg-cyan-500/30 transition-colors"
-              title={radarPlaying ? 'Pause' : 'Play'}
+              onClick={() => setMode('PTYPE')}
+              className={`flex-1 px-2 py-1 text-[10px] font-medium transition-colors ${
+                radarMode === 'PTYPE'
+                  ? 'bg-purple-500/30 text-purple-400'
+                  : 'bg-transparent text-mv-text-muted hover:bg-white/5'
+              }`}
             >
-              {radarPlaying ? (
-                <Pause size={16} className="text-cyan-400" />
-              ) : (
-                <Play size={16} className="text-cyan-400 ml-0.5" />
-              )}
+              P-TYPE
             </button>
-
             <button
-              onClick={handleStepForward}
-              className="p-1.5 rounded bg-white/5 hover:bg-white/10 transition-colors"
-              title="Step forward"
+              onClick={() => setMode('OFF')}
+              className={`px-2 py-1 text-[10px] font-medium transition-colors ${
+                radarMode === 'OFF'
+                  ? 'bg-white/10 text-mv-text-primary'
+                  : 'bg-transparent text-mv-text-muted hover:bg-white/5'
+              }`}
             >
-              <SkipForward size={14} className="text-mv-text-secondary" />
+              OFF
             </button>
-
-            <div className="flex-1 ml-2">
-              <input
-                type="range"
-                min={0}
-                max={RADAR_FRAME_COUNT - 1}
-                value={currentFrameIndex}
-                onChange={handleSliderChange}
-                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer
-                  [&::-webkit-slider-thumb]:appearance-none
-                  [&::-webkit-slider-thumb]:w-3
-                  [&::-webkit-slider-thumb]:h-3
-                  [&::-webkit-slider-thumb]:rounded-full
-                  [&::-webkit-slider-thumb]:bg-cyan-400
-                  [&::-webkit-slider-thumb]:cursor-pointer
-                  [&::-webkit-slider-thumb]:hover:bg-cyan-300
-                  [&::-moz-range-thumb]:w-3
-                  [&::-moz-range-thumb]:h-3
-                  [&::-moz-range-thumb]:rounded-full
-                  [&::-moz-range-thumb]:bg-cyan-400
-                  [&::-moz-range-thumb]:border-0
-                  [&::-moz-range-thumb]:cursor-pointer"
-              />
-            </div>
-          </div>
-
-          {/* Time labels */}
-          <div className="flex justify-between text-[9px] text-mv-text-muted">
-            <span>-60 min</span>
-            <span>Now</span>
           </div>
         </div>
-      )}
 
-      {/* P-type animation controls */}
-      {ptypeEnabled && ptypeLayersReady && (
-        <div className="absolute bottom-3 left-3 bg-mv-bg-secondary/95 backdrop-blur-sm rounded-lg border border-white/10 p-2 z-10" style={{ maxWidth: '220px' }}>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-medium text-mv-text-primary">P-Type</span>
-            <span className="text-[11px] text-purple-400 font-mono">{currentPtypeFrameLabel}</span>
-          </div>
+        {/* Row 2: Slider */}
+        {radarMode !== 'OFF' && layersReady && (
+          <>
+            <input
+              type="range"
+              min={0}
+              max={FRAME_COUNT - 1}
+              value={currentFrameIndex}
+              onChange={handleSliderChange}
+              className="w-full h-1 bg-white/10 rounded-full appearance-none cursor-pointer mb-1.5
+                [&::-webkit-slider-thumb]:appearance-none
+                [&::-webkit-slider-thumb]:w-2.5
+                [&::-webkit-slider-thumb]:h-2.5
+                [&::-webkit-slider-thumb]:rounded-full
+                [&::-webkit-slider-thumb]:bg-cyan-400
+                [&::-webkit-slider-thumb]:cursor-pointer
+                [&::-moz-range-thumb]:w-2.5
+                [&::-moz-range-thumb]:h-2.5
+                [&::-moz-range-thumb]:rounded-full
+                [&::-moz-range-thumb]:bg-cyan-400
+                [&::-moz-range-thumb]:border-0"
+            />
 
-          {/* Playback controls */}
-          <div className="flex items-center gap-1.5 mb-1.5">
-            <button
-              onClick={handlePtypeStepBack}
-              className="p-1 rounded bg-white/5 hover:bg-white/10 transition-colors"
-              title="Step back"
-            >
-              <SkipBack size={12} className="text-mv-text-secondary" />
-            </button>
-
-            <button
-              onClick={handlePtypePlayPause}
-              className="p-1.5 rounded-full bg-purple-500/20 hover:bg-purple-500/30 transition-colors"
-              title={ptypePlaying ? 'Pause' : 'Play'}
-            >
-              {ptypePlaying ? (
-                <Pause size={14} className="text-purple-400" />
-              ) : (
-                <Play size={14} className="text-purple-400 ml-0.5" />
-              )}
-            </button>
-
-            <button
-              onClick={handlePtypeStepForward}
-              className="p-1 rounded bg-white/5 hover:bg-white/10 transition-colors"
-              title="Step forward"
-            >
-              <SkipForward size={12} className="text-mv-text-secondary" />
-            </button>
-
-            <div className="flex-1 ml-1.5">
-              <input
-                type="range"
-                min={0}
-                max={PTYPE_FRAME_COUNT - 1}
-                value={currentPtypeFrameIndex}
-                onChange={handlePtypeSliderChange}
-                className="w-full h-1 bg-white/10 rounded-full appearance-none cursor-pointer
-                  [&::-webkit-slider-thumb]:appearance-none
-                  [&::-webkit-slider-thumb]:w-2.5
-                  [&::-webkit-slider-thumb]:h-2.5
-                  [&::-webkit-slider-thumb]:rounded-full
-                  [&::-webkit-slider-thumb]:bg-purple-400
-                  [&::-webkit-slider-thumb]:cursor-pointer
-                  [&::-webkit-slider-thumb]:hover:bg-purple-300
-                  [&::-moz-range-thumb]:w-2.5
-                  [&::-moz-range-thumb]:h-2.5
-                  [&::-moz-range-thumb]:rounded-full
-                  [&::-moz-range-thumb]:bg-purple-400
-                  [&::-moz-range-thumb]:border-0
-                  [&::-moz-range-thumb]:cursor-pointer"
-              />
+            {/* Row 3: Time label */}
+            <div className="flex justify-between items-center text-[9px]">
+              <span className="text-mv-text-muted">-2 hr</span>
+              <span className={`font-mono ${radarMode === 'RADAR' ? 'text-green-400' : 'text-purple-400'}`}>
+                {currentFrameLabel}
+              </span>
+              <span className="text-mv-text-muted">Now</span>
             </div>
-          </div>
+          </>
+        )}
 
-          {/* Time labels */}
-          <div className="flex justify-between text-[8px] text-mv-text-muted mb-2">
-            <span>-120 min</span>
-            <span>Now</span>
-          </div>
-
-          {/* P-type legend */}
-          <div className="border-t border-white/10 pt-1.5">
-            <div className="text-[9px] text-mv-text-muted mb-1">Precip Type</div>
-            <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[9px]">
+        {/* P-TYPE Legend (only when P-TYPE is active) */}
+        {radarMode === 'PTYPE' && (
+          <div className="border-t border-white/10 mt-2 pt-2">
+            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px]">
               <div className="flex items-center gap-1">
-                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#00FF00' }} />
-                <span className="text-mv-text-secondary">Rain</span>
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #93C5FD, #1E3A8A)' }} />
+                <span className="text-mv-text-secondary">Snow</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#FF69B4' }} />
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #FBCFE8, #BE185D)' }} />
                 <span className="text-mv-text-secondary">Mix</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#FF0000' }} />
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #DDD6FE, #6D28D9)' }} />
                 <span className="text-mv-text-secondary">Frzn</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#00BFFF' }} />
-                <span className="text-mv-text-secondary">Snow</span>
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #E9D5FF, #7E22CE)' }} />
+                <span className="text-mv-text-secondary">Sleet</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #BBF7D0, #15803D)' }} />
+                <span className="text-mv-text-secondary">Rain</span>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Legend - Category-based */}
       <div
