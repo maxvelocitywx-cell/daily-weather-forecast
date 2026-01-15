@@ -3,10 +3,19 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { Maximize2 } from 'lucide-react';
+import { Maximize2, Play, Pause, SkipBack, SkipForward } from 'lucide-react';
 
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
+
+// MRMS Radar Animation Config
+const RADAR_FRAME_COUNT = 13; // 13 frames = 60 minutes at 5-min intervals
+const RADAR_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
+const ANIMATION_SPEED_MS = 700; // Time between frames when playing
+const RADAR_OPACITY = 0.65;
+
+// NOAA MRMS ImageServer base URL
+const MRMS_BASE_URL = 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/radar/radar_base_reflectivity_time/ImageServer';
 
 // Event-based color mapping (keyed by event string)
 const EVENT_COLORS: Record<string, string> = {
@@ -163,6 +172,34 @@ function getSeverityStyle(severity: string): { fillOpacity: number; lineWidth: n
   return SEVERITY_STYLE[severity] || SEVERITY_STYLE.Unknown;
 }
 
+// Generate radar frame timestamps (newest to oldest)
+function generateRadarFrames(): { timestamp: number; label: string }[] {
+  const now = Date.now();
+  // Round down to nearest 5 minutes
+  const roundedNow = Math.floor(now / RADAR_INTERVAL_MS) * RADAR_INTERVAL_MS;
+
+  const frames: { timestamp: number; label: string }[] = [];
+  for (let i = 0; i < RADAR_FRAME_COUNT; i++) {
+    const timestamp = roundedNow - (i * RADAR_INTERVAL_MS);
+    const date = new Date(timestamp);
+    const label = date.toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
+    frames.push({ timestamp, label });
+  }
+
+  return frames.reverse(); // Oldest first, newest last
+}
+
+// Build MRMS tile URL for a specific timestamp
+function buildRadarTileUrl(timestamp: number): string {
+  // Use WMS export endpoint with time parameter
+  // Format: exportImage with bbox from tile coordinates
+  return `${MRMS_BASE_URL}/exportImage?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&time=${timestamp}&f=image`;
+}
+
 export interface AlertGeometry {
   type: string;
   coordinates: number[][][] | number[][][][] | number[][] | number[][][];
@@ -227,8 +264,29 @@ export default function AlertsMapClient({
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const hoverPopup = useRef<mapboxgl.Popup | null>(null);
+  const animationRef = useRef<NodeJS.Timeout | null>(null);
+
   const [mapLoaded, setMapLoaded] = useState(false);
   const [legendExpanded, setLegendExpanded] = useState(false);
+
+  // Radar animation state
+  const [radarEnabled, setRadarEnabled] = useState(true);
+  const [radarPlaying, setRadarPlaying] = useState(true);
+  const [currentFrameIndex, setCurrentFrameIndex] = useState(RADAR_FRAME_COUNT - 1); // Start at newest
+  const [radarFrames, setRadarFrames] = useState<{ timestamp: number; label: string }[]>([]);
+  const [radarLayersReady, setRadarLayersReady] = useState(false);
+
+  // Generate radar frames on mount
+  useEffect(() => {
+    setRadarFrames(generateRadarFrames());
+
+    // Refresh frames every 5 minutes
+    const refreshInterval = setInterval(() => {
+      setRadarFrames(generateRadarFrames());
+    }, RADAR_INTERVAL_MS);
+
+    return () => clearInterval(refreshInterval);
+  }, []);
 
   // Convert alerts to GeoJSON - NO POINT LAYERS, only fill/line
   const { polygonGeoJSON, lineGeoJSON } = useMemo(() => {
@@ -309,18 +367,117 @@ export default function AlertsMapClient({
 
     return () => {
       resizeObserver.disconnect();
+      if (animationRef.current) {
+        clearInterval(animationRef.current);
+      }
       map.current?.remove();
       map.current = null;
     };
   }, []);
 
-  // Helper to find the first symbol layer id (for inserting alerts below labels)
+  // Helper to find the first symbol layer id (for inserting layers below labels)
   const getFirstSymbolLayerId = useCallback((): string | undefined => {
     if (!map.current) return undefined;
     const style = map.current.getStyle();
     if (!style || !style.layers) return undefined;
     const firstSymbol = style.layers.find(l => l.type === 'symbol');
     return firstSymbol?.id;
+  }, []);
+
+  // Add radar layers (one per frame, all hidden initially except the current one)
+  useEffect(() => {
+    if (!mapLoaded || !map.current || radarFrames.length === 0) return;
+
+    const firstSymbolId = getFirstSymbolLayerId();
+
+    // Add radar sources and layers for each frame
+    radarFrames.forEach((frame, index) => {
+      const sourceId = `radar-source-${index}`;
+      const layerId = `radar-layer-${index}`;
+
+      if (!map.current?.getSource(sourceId)) {
+        map.current?.addSource(sourceId, {
+          type: 'raster',
+          tiles: [buildRadarTileUrl(frame.timestamp)],
+          tileSize: 256,
+          attribution: 'NOAA MRMS'
+        });
+
+        map.current?.addLayer({
+          id: layerId,
+          type: 'raster',
+          source: sourceId,
+          paint: {
+            'raster-opacity': index === currentFrameIndex && radarEnabled ? RADAR_OPACITY : 0,
+            'raster-fade-duration': 0
+          }
+        }, firstSymbolId); // Insert below labels
+      }
+    });
+
+    setRadarLayersReady(true);
+  }, [mapLoaded, radarFrames, getFirstSymbolLayerId]);
+
+  // Update radar layer visibility when frame changes
+  useEffect(() => {
+    if (!mapLoaded || !map.current || !radarLayersReady) return;
+
+    radarFrames.forEach((_, index) => {
+      const layerId = `radar-layer-${index}`;
+      if (map.current?.getLayer(layerId)) {
+        map.current.setPaintProperty(
+          layerId,
+          'raster-opacity',
+          index === currentFrameIndex && radarEnabled ? RADAR_OPACITY : 0
+        );
+      }
+    });
+  }, [mapLoaded, radarLayersReady, currentFrameIndex, radarEnabled, radarFrames]);
+
+  // Animation loop
+  useEffect(() => {
+    if (!radarPlaying || !radarEnabled || !radarLayersReady) {
+      if (animationRef.current) {
+        clearInterval(animationRef.current);
+        animationRef.current = null;
+      }
+      return;
+    }
+
+    animationRef.current = setInterval(() => {
+      setCurrentFrameIndex(prev => (prev + 1) % RADAR_FRAME_COUNT);
+    }, ANIMATION_SPEED_MS);
+
+    return () => {
+      if (animationRef.current) {
+        clearInterval(animationRef.current);
+        animationRef.current = null;
+      }
+    };
+  }, [radarPlaying, radarEnabled, radarLayersReady]);
+
+  // Radar controls
+  const handlePlayPause = useCallback(() => {
+    setRadarPlaying(prev => !prev);
+  }, []);
+
+  const handleStepBack = useCallback(() => {
+    setRadarPlaying(false);
+    setCurrentFrameIndex(prev => (prev - 1 + RADAR_FRAME_COUNT) % RADAR_FRAME_COUNT);
+  }, []);
+
+  const handleStepForward = useCallback(() => {
+    setRadarPlaying(false);
+    setCurrentFrameIndex(prev => (prev + 1) % RADAR_FRAME_COUNT);
+  }, []);
+
+  const handleSliderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setRadarPlaying(false);
+    setCurrentFrameIndex(parseInt(e.target.value, 10));
+  }, []);
+
+  const toggleRadar = useCallback(() => {
+    setRadarEnabled(prev => !prev);
   }, []);
 
   // Add/update alert layers - ONLY fill and line layers, NO point/circle/symbol layers
@@ -410,7 +567,7 @@ export default function AlertsMapClient({
     }
   }, [mapLoaded, polygonGeoJSON, lineGeoJSON, getFirstSymbolLayerId]);
 
-  // Re-order alert layers below labels when style changes
+  // Re-order layers below labels when style changes
   useEffect(() => {
     if (!map.current) return;
 
@@ -419,6 +576,14 @@ export default function AlertsMapClient({
 
       const firstSymbolId = getFirstSymbolLayerId();
       if (!firstSymbolId) return;
+
+      // Move radar layers below the first symbol layer
+      radarFrames.forEach((_, index) => {
+        const layerId = `radar-layer-${index}`;
+        if (map.current?.getLayer(layerId)) {
+          map.current.moveLayer(layerId, firstSymbolId);
+        }
+      });
 
       // Move alert layers below the first symbol layer if they exist
       if (map.current.getLayer('alert-polygons-fill')) {
@@ -437,7 +602,7 @@ export default function AlertsMapClient({
     return () => {
       map.current?.off('styledata', handleStyleData);
     };
-  }, [getFirstSymbolLayerId]);
+  }, [getFirstSymbolLayerId, radarFrames]);
 
   // Handle selection state
   useEffect(() => {
@@ -683,19 +848,109 @@ export default function AlertsMapClient({
     }
   }, [alerts]);
 
+  const currentFrameLabel = radarFrames[currentFrameIndex]?.label || '';
+
   return (
     <div className="relative w-full rounded-xl overflow-hidden border border-white/10" style={{ height }}>
       <div ref={mapContainer} className="absolute inset-0" />
 
-      {/* Fit to all button */}
-      <button
-        onClick={fitToAllAlerts}
-        className="absolute top-3 left-3 flex items-center gap-2 px-3 py-2 bg-mv-bg-secondary/90 backdrop-blur-sm rounded-lg border border-white/10 hover:border-white/20 transition-colors z-10"
-        title="Fit to all alerts"
-      >
-        <Maximize2 size={14} className="text-mv-text-primary" />
-        <span className="text-xs text-mv-text-secondary">Fit All</span>
-      </button>
+      {/* Top left controls */}
+      <div className="absolute top-3 left-3 flex flex-col gap-2 z-10">
+        {/* Fit to all button */}
+        <button
+          onClick={fitToAllAlerts}
+          className="flex items-center gap-2 px-3 py-2 bg-mv-bg-secondary/90 backdrop-blur-sm rounded-lg border border-white/10 hover:border-white/20 transition-colors"
+          title="Fit to all alerts"
+        >
+          <Maximize2 size={14} className="text-mv-text-primary" />
+          <span className="text-xs text-mv-text-secondary">Fit All</span>
+        </button>
+
+        {/* Radar toggle */}
+        <button
+          onClick={toggleRadar}
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+            radarEnabled
+              ? 'bg-green-500/20 border-green-500/50 hover:border-green-500'
+              : 'bg-mv-bg-secondary/90 border-white/10 hover:border-white/20'
+          }`}
+          title={radarEnabled ? 'Hide radar' : 'Show radar'}
+        >
+          <div className={`w-2 h-2 rounded-full ${radarEnabled ? 'bg-green-500' : 'bg-gray-500'}`} />
+          <span className="text-xs text-mv-text-secondary">Radar</span>
+        </button>
+      </div>
+
+      {/* Radar animation controls */}
+      {radarEnabled && radarLayersReady && (
+        <div className="absolute bottom-16 left-3 right-3 sm:left-3 sm:right-auto sm:w-80 bg-mv-bg-secondary/95 backdrop-blur-sm rounded-lg border border-white/10 p-3 z-10">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-mv-text-primary">MRMS Radar</span>
+            <span className="text-xs text-cyan-400 font-mono">{currentFrameLabel}</span>
+          </div>
+
+          {/* Playback controls */}
+          <div className="flex items-center gap-2 mb-2">
+            <button
+              onClick={handleStepBack}
+              className="p-1.5 rounded bg-white/5 hover:bg-white/10 transition-colors"
+              title="Step back"
+            >
+              <SkipBack size={14} className="text-mv-text-secondary" />
+            </button>
+
+            <button
+              onClick={handlePlayPause}
+              className="p-2 rounded-full bg-cyan-500/20 hover:bg-cyan-500/30 transition-colors"
+              title={radarPlaying ? 'Pause' : 'Play'}
+            >
+              {radarPlaying ? (
+                <Pause size={16} className="text-cyan-400" />
+              ) : (
+                <Play size={16} className="text-cyan-400 ml-0.5" />
+              )}
+            </button>
+
+            <button
+              onClick={handleStepForward}
+              className="p-1.5 rounded bg-white/5 hover:bg-white/10 transition-colors"
+              title="Step forward"
+            >
+              <SkipForward size={14} className="text-mv-text-secondary" />
+            </button>
+
+            <div className="flex-1 ml-2">
+              <input
+                type="range"
+                min={0}
+                max={RADAR_FRAME_COUNT - 1}
+                value={currentFrameIndex}
+                onChange={handleSliderChange}
+                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer
+                  [&::-webkit-slider-thumb]:appearance-none
+                  [&::-webkit-slider-thumb]:w-3
+                  [&::-webkit-slider-thumb]:h-3
+                  [&::-webkit-slider-thumb]:rounded-full
+                  [&::-webkit-slider-thumb]:bg-cyan-400
+                  [&::-webkit-slider-thumb]:cursor-pointer
+                  [&::-webkit-slider-thumb]:hover:bg-cyan-300
+                  [&::-moz-range-thumb]:w-3
+                  [&::-moz-range-thumb]:h-3
+                  [&::-moz-range-thumb]:rounded-full
+                  [&::-moz-range-thumb]:bg-cyan-400
+                  [&::-moz-range-thumb]:border-0
+                  [&::-moz-range-thumb]:cursor-pointer"
+              />
+            </div>
+          </div>
+
+          {/* Time labels */}
+          <div className="flex justify-between text-[9px] text-mv-text-muted">
+            <span>-60 min</span>
+            <span>Now</span>
+          </div>
+        </div>
+      )}
 
       {/* Legend - Category-based */}
       <div
