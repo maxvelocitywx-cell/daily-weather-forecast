@@ -173,9 +173,9 @@ function unionFeatures(features: GeoJSON.Feature[]): GeoJSON.Feature | null {
   try {
     let result = features[0];
     for (let i = 1; i < features.length; i++) {
-      const unioned = turf.union(
-        turf.featureCollection([result as turf.Feature<turf.Polygon | turf.MultiPolygon>, features[i] as turf.Feature<turf.Polygon | turf.MultiPolygon>])
-      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fc = turf.featureCollection([result, features[i]]) as any;
+      const unioned = turf.union(fc);
       if (unioned) {
         result = unioned as GeoJSON.Feature;
       }
@@ -196,9 +196,9 @@ function subtractGeometry(a: GeoJSON.Feature | null, b: GeoJSON.Feature | null):
   if (!b) return a;
 
   try {
-    const result = turf.difference(
-      turf.featureCollection([a as turf.Feature<turf.Polygon | turf.MultiPolygon>, b as turf.Feature<turf.Polygon | turf.MultiPolygon>])
-    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fc = turf.featureCollection([a, b]) as any;
+    const result = turf.difference(fc);
     return result as GeoJSON.Feature | null;
   } catch (err) {
     console.error('Error subtracting geometry:', err);
