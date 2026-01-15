@@ -20,7 +20,7 @@ mapboxgl.accessToken = MAPBOX_TOKEN;
 
 // Animation config
 const ANIMATION_SPEED_MS = 500;
-const CROSSFADE_DURATION_MS = 200;
+const CROSSFADE_DURATION_MS = 300; // Slightly longer for smoother transitions
 const MODEL_OPACITY = 0.95;
 
 // Region presets
@@ -294,7 +294,7 @@ export default function ModelsClient() {
         maxzoom: modelMaxZoom + 2, // Allow some overzooming with linear resampling
         paint: {
           'raster-opacity': buffer === 'A' ? MODEL_OPACITY : 0,
-          'raster-fade-duration': 0,
+          'raster-fade-duration': 150, // Slight fade for smoother tile loading
           'raster-resampling': 'linear', // Smooth bilinear interpolation
         },
       }, firstSymbolId);

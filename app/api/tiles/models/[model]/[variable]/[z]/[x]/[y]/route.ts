@@ -13,20 +13,85 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 // High-resolution tile size
 const TILE_SIZE = 512;
 
-// Maximum density grid sampling for silky-smooth interpolation
-// 32x32 grid = 1024 sample points per tile, fetched in parallel
-// This provides near-continuous gradients even at high zoom
-const GRID_SIZE = 32;
+// Zoom-aware grid sampling:
+// - Low zoom (0-5): Coarser grid, more smoothing for clean national view
+// - High zoom (6+): Dense grid for detail
+function getGridSizeForZoom(z: number): number {
+  if (z <= 3) return 12;  // Very coarse for continental view
+  if (z <= 5) return 16;  // Moderate for regional view
+  if (z <= 7) return 24;  // Good detail
+  return 32;              // Maximum detail for close-up
+}
+
+// Zoom-aware blur radius for smoothing
+function getBlurRadiusForZoom(z: number): number {
+  if (z <= 3) return 2.5;  // Strong smoothing for clean national view
+  if (z <= 5) return 1.5;  // Moderate smoothing
+  if (z <= 7) return 0.8;  // Light smoothing
+  return 0.5;              // Minimal smoothing for detail
+}
+
+// Zoom-aware opacity (slightly more transparent at low zoom for cleaner look)
+function getOpacityForZoom(z: number): number {
+  if (z <= 3) return 180;  // More transparent at national view
+  if (z <= 5) return 190;  // Slightly more transparent
+  return 200;              // Full opacity for detail
+}
 
 // Chunk size for API requests - larger chunks = fewer requests = faster
 const API_CHUNK_SIZE = 100;
 
-// Contour configuration - tighter intervals for professional look
-const CONTOUR_INTERVALS: Record<string, { interval: number; color: number[]; width: number }> = {
-  temperature: { interval: 2, color: [30, 30, 30], width: 1 }, // Every 2°F
-  pressure: { interval: 4, color: [30, 30, 30], width: 1 }, // Every 4mb
-  heights: { interval: 60, color: [30, 30, 30], width: 1 }, // Every 60m (500mb)
-};
+// Contour configuration - zoom-aware intervals
+// Wider intervals at low zoom for cleaner appearance
+function getContourConfig(variable: string, z: number): { interval: number; color: number[]; width: number } | null {
+  // At low zoom, always show contours for key variables
+  const isLowZoom = z <= 5;
+
+  if (variable.includes('temperature') || variable.includes('dew_point') || variable.includes('apparent')) {
+    return {
+      interval: isLowZoom ? 5 : 2, // 5°F intervals at low zoom, 2°F at high zoom
+      color: isLowZoom ? [50, 50, 50] : [30, 30, 30],
+      width: 1
+    };
+  }
+  if (variable.includes('pressure') || variable === 'pressure_msl' || variable === 'surface_pressure') {
+    return {
+      interval: isLowZoom ? 8 : 4, // 8mb at low zoom, 4mb at high zoom
+      color: isLowZoom ? [50, 50, 50] : [30, 30, 30],
+      width: 1
+    };
+  }
+  if (variable.includes('geopotential') || variable.includes('height')) {
+    return {
+      interval: isLowZoom ? 120 : 60, // 120m at low zoom, 60m at high zoom
+      color: isLowZoom ? [50, 50, 50] : [30, 30, 30],
+      width: 1
+    };
+  }
+
+  // For other variables at low zoom, don't draw contours (reduces noise)
+  if (isLowZoom) return null;
+
+  return null;
+}
+
+// Check if variable is "noisy" at low zoom (precip types, etc.)
+function isNoisyVariableAtLowZoom(variable: string, z: number): boolean {
+  if (z > 5) return false; // Not noisy at high zoom
+
+  // These variables look speckled/noisy at national view
+  const noisyVars = [
+    'precipitation_type',
+    'snowfall',
+    'snow_depth',
+    'freezing_level',
+    'visibility',
+    'lightning',
+    'hail'
+  ];
+
+  return noisyVars.some(v => variable.includes(v));
+}
 
 // Convert tile coordinates to lat/lon bounds
 function tileToBounds(z: number, x: number, y: number): { north: number; south: number; west: number; east: number } {
@@ -395,8 +460,8 @@ export async function GET(
     });
   }
 
-  // Check cache
-  const cacheKey = `model/${modelId}/${variable}/${z}/${x}/${y}/${forecastHour}/${runTime || 'latest'}/v2`;
+  // Check cache (v3 = zoom-aware rendering)
+  const cacheKey = `model/${modelId}/${variable}/${z}/${x}/${y}/${forecastHour}/${runTime || 'latest'}/v3`;
   const cached = tileCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return new NextResponse(new Uint8Array(cached.data), {
@@ -427,8 +492,23 @@ export async function GET(
     const apiEndpoint = model.openMeteoApiEndpoint || 'forecast';
     const baseUrl = `https://customer-api.open-meteo.com/v1/${apiEndpoint}`;
 
-    // Fetch grid data
-    const gridData = await fetchGridData(baseUrl, model, variable, forecastHour, bounds, GRID_SIZE);
+    // Zoom-aware grid size - coarser at low zoom for smoother appearance
+    const gridSize = getGridSizeForZoom(z);
+
+    // Check if this is a noisy variable at low zoom - skip rendering
+    if (isNoisyVariableAtLowZoom(variable, z)) {
+      const transparent = await createTransparentTile();
+      return new NextResponse(new Uint8Array(transparent), {
+        headers: {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'public, max-age=300',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
+
+    // Fetch grid data with zoom-appropriate sampling
+    const gridData = await fetchGridData(baseUrl, model, variable, forecastHour, bounds, gridSize);
 
     // Check if we have any valid data
     const hasValidData = gridData.some(row => row.some(v => v !== null));
@@ -443,18 +523,12 @@ export async function GET(
       });
     }
 
-    // Get color scale and contour config
+    // Get color scale and zoom-aware contour config
     const colorScale = getColorScaleForVariable(variable);
+    const contourConfig = getContourConfig(variable, z);
 
-    // Determine if we should draw contours
-    let contourConfig: { interval: number; color: number[]; width: number } | null = null;
-    if (variable.includes('temperature') || variable.includes('dew_point') || variable.includes('apparent')) {
-      contourConfig = CONTOUR_INTERVALS.temperature;
-    } else if (variable.includes('pressure') || variable === 'pressure_msl' || variable === 'surface_pressure') {
-      contourConfig = CONTOUR_INTERVALS.pressure;
-    } else if (variable.includes('geopotential') || variable.includes('height')) {
-      contourConfig = CONTOUR_INTERVALS.heights;
-    }
+    // Zoom-aware opacity
+    const baseOpacity = getOpacityForZoom(z);
 
     // Create output buffer
     const outputBuffer = Buffer.alloc(TILE_SIZE * TILE_SIZE * 4);
@@ -526,7 +600,7 @@ export async function GET(
 
         // Get base color
         let color = getColorForValue(value, colorScale);
-        let alpha = 200; // Base opacity
+        let alpha = baseOpacity; // Zoom-aware opacity
 
         // Check for contour using pre-converted grid
         if (contourConfig) {
@@ -550,7 +624,10 @@ export async function GET(
       }
     }
 
-    // Encode to PNG (light blur to smooth any remaining artifacts)
+    // Zoom-aware blur - stronger at low zoom for cleaner appearance
+    const blurRadius = getBlurRadiusForZoom(z);
+
+    // Encode to PNG with zoom-appropriate smoothing
     const outputPng = await sharp(outputBuffer, {
       raw: {
         width: TILE_SIZE,
@@ -558,7 +635,7 @@ export async function GET(
         channels: 4,
       },
     })
-      .blur(0.5) // Light blur to smooth edges
+      .blur(blurRadius)
       .png()
       .toBuffer();
 
