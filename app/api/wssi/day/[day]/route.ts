@@ -313,12 +313,43 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
     const band = exclusiveBands[category];
     if (!band || !band.geometry) continue;
 
+    // Validate geometry before processing
+    const geom = band.geometry;
+    if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') {
+      console.log(`[WSSI] Skipping ${category} - invalid geometry type: ${geom.type}`);
+      continue;
+    }
+
+    // Check if geometry has valid area (skip empty/degenerate polygons)
     try {
-      // Simplify first
-      let processed = turf.simplify(band as turf.AllGeoJSON, {
-        tolerance: 0.008,
-        highQuality: true,
-      }) as GeoJSON.Feature;
+      const area = turf.area(band);
+      if (area < 1000000) { // Less than 1 km² - skip degenerate
+        console.log(`[WSSI] Skipping ${category} - area too small: ${area / 1000000} km²`);
+        continue;
+      }
+    } catch {
+      console.log(`[WSSI] Skipping ${category} - could not calculate area`);
+      continue;
+    }
+
+    try {
+      // Simplify with gentler tolerance first
+      let processed: GeoJSON.Feature;
+      try {
+        processed = turf.simplify(band as turf.AllGeoJSON, {
+          tolerance: 0.005,
+          highQuality: true,
+        }) as GeoJSON.Feature;
+      } catch {
+        // If simplify fails, use original
+        processed = band;
+      }
+
+      // Validate simplified geometry still has area
+      if (!processed.geometry) {
+        console.log(`[WSSI] Skipping ${category} - simplify produced null geometry`);
+        continue;
+      }
 
       // Buffer trick for rounded corners
       try {
