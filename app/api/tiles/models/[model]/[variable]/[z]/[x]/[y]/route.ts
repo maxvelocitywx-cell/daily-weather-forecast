@@ -14,80 +14,86 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const TILE_SIZE = 512;
 
 // Zoom-aware grid sampling:
-// - Low zoom (0-5): Coarser grid, more smoothing for clean national view
+// - Low zoom (0-5): Coarser grid for smoother continuous fields
 // - High zoom (6+): Dense grid for detail
 function getGridSizeForZoom(z: number): number {
-  if (z <= 3) return 12;  // Very coarse for continental view
-  if (z <= 5) return 16;  // Moderate for regional view
-  if (z <= 7) return 24;  // Good detail
-  return 32;              // Maximum detail for close-up
+  if (z <= 3) return 10;  // Very coarse for continental view - smoother fields
+  if (z <= 5) return 14;  // Moderate for regional view
+  if (z <= 7) return 20;  // Good detail
+  return 28;              // Maximum detail for close-up
 }
 
-// Zoom-aware blur radius for smoothing
-function getBlurRadiusForZoom(z: number): number {
-  if (z <= 3) return 2.5;  // Strong smoothing for clean national view
-  if (z <= 5) return 1.5;  // Moderate smoothing
-  if (z <= 7) return 0.8;  // Light smoothing
-  return 0.5;              // Minimal smoothing for detail
+// Post-render blur radius (applied after colorizing)
+// Stronger at low zoom for clean continuous appearance
+function getPostBlurRadius(z: number): number {
+  if (z <= 3) return 3.0;   // Strong smoothing for national view
+  if (z <= 5) return 2.0;   // Moderate smoothing for regional
+  if (z <= 7) return 1.0;   // Light smoothing
+  return 0.5;               // Minimal for detail
 }
 
-// Zoom-aware opacity (slightly more transparent at low zoom for cleaner look)
+// Zoom-aware opacity
 function getOpacityForZoom(z: number): number {
-  if (z <= 3) return 180;  // More transparent at national view
-  if (z <= 5) return 190;  // Slightly more transparent
-  return 200;              // Full opacity for detail
+  if (z <= 3) return 185;  // Slightly more transparent at national view
+  if (z <= 5) return 195;  // Slightly more transparent
+  return 210;              // Good opacity for detail
 }
 
 // Chunk size for API requests - larger chunks = fewer requests = faster
 const API_CHUNK_SIZE = 100;
 
-// Contour configuration - zoom-aware intervals
-// Wider intervals at low zoom for cleaner appearance
-function getContourConfig(variable: string, z: number): { interval: number; color: number[]; width: number } | null {
-  // At low zoom, always show contours for key variables
-  const isLowZoom = z <= 5;
+// Contour configuration - ONLY enabled at zoom >= 6
+// At low zoom (<=5), we want clean continuous gradients without contour noise
+function getContourConfig(variable: string, z: number): { interval: number; color: number[]; opacity: number } | null {
+  // NO contours at low zoom - just smooth continuous fields
+  if (z <= 5) return null;
 
+  // Contours only at zoom 6+ with wider intervals and semi-transparent lines
   if (variable.includes('temperature') || variable.includes('dew_point') || variable.includes('apparent')) {
     return {
-      interval: isLowZoom ? 5 : 2, // 5°F intervals at low zoom, 2°F at high zoom
-      color: isLowZoom ? [50, 50, 50] : [30, 30, 30],
-      width: 1
+      interval: z <= 7 ? 5 : 4, // 5°F at mid zoom, 4°F at high zoom
+      color: [40, 40, 40],
+      opacity: 140 // Semi-transparent
     };
   }
   if (variable.includes('pressure') || variable === 'pressure_msl' || variable === 'surface_pressure') {
     return {
-      interval: isLowZoom ? 8 : 4, // 8mb at low zoom, 4mb at high zoom
-      color: isLowZoom ? [50, 50, 50] : [30, 30, 30],
-      width: 1
+      interval: z <= 7 ? 8 : 6, // 8mb at mid zoom, 6mb at high zoom
+      color: [40, 40, 40],
+      opacity: 140
     };
   }
   if (variable.includes('geopotential') || variable.includes('height')) {
     return {
-      interval: isLowZoom ? 120 : 60, // 120m at low zoom, 60m at high zoom
-      color: isLowZoom ? [50, 50, 50] : [30, 30, 30],
-      width: 1
+      interval: 120, // 120m intervals
+      color: [40, 40, 40],
+      opacity: 140
     };
   }
 
-  // For other variables at low zoom, don't draw contours (reduces noise)
-  if (isLowZoom) return null;
-
+  // No contours for other variables (precip, wind, etc)
   return null;
 }
 
-// Check if variable is "noisy" at low zoom (precip types, etc.)
+// Check if variable is "noisy" at low zoom (precip types, instantaneous fields, etc.)
+// These should be hidden at overview zoom and only shown when zoomed in
 function isNoisyVariableAtLowZoom(variable: string, z: number): boolean {
-  if (z > 5) return false; // Not noisy at high zoom
+  if (z > 5) return false; // Show all variables at higher zoom
 
   // These variables look speckled/noisy at national view
   const noisyVars = [
     'precipitation_type',
+    'precipitation',  // Instantaneous precip is noisy
+    'rain',
     'snowfall',
     'snow_depth',
     'freezing_level',
     'visibility',
     'lightning',
-    'hail'
+    'hail',
+    'cloud_cover',
+    'convective',
+    'showers',
   ];
 
   return noisyVars.some(v => variable.includes(v));
@@ -332,8 +338,10 @@ async function fetchGridData(
   const grid: (number | null)[][] = [];
 
   // Create grid of lat/lon points with padding for edge interpolation
-  const latPadding = (bounds.north - bounds.south) * 0.15;
-  const lonPadding = (bounds.east - bounds.west) * 0.15;
+  // Larger padding helps with tile seams, especially for contours at higher zoom
+  const paddingFactor = 0.20; // 20% padding on each side
+  const latPadding = (bounds.north - bounds.south) * paddingFactor;
+  const lonPadding = (bounds.east - bounds.west) * paddingFactor;
 
   const latMin = bounds.south - latPadding;
   const latMax = bounds.north + latPadding;
@@ -460,8 +468,8 @@ export async function GET(
     });
   }
 
-  // Check cache (v3 = zoom-aware rendering)
-  const cacheKey = `model/${modelId}/${variable}/${z}/${x}/${y}/${forecastHour}/${runTime || 'latest'}/v3`;
+  // Check cache (v4 = improved low-zoom rendering, no contours at z<=5)
+  const cacheKey = `model/${modelId}/${variable}/${z}/${x}/${y}/${forecastHour}/${runTime || 'latest'}/v4`;
   const cached = tileCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return new NextResponse(new Uint8Array(cached.data), {
@@ -538,7 +546,7 @@ export async function GET(
     const gridWidth = gridData[0]?.length || 0;
 
     // Padding ratios (grid extends beyond tile bounds) - must match fetchGridData
-    const paddingRatio = 0.15;
+    const paddingRatio = 0.20;
 
     // Map tile pixel to grid coordinate
     // The grid covers [bounds - padding] to [bounds + padding]
@@ -602,7 +610,7 @@ export async function GET(
         let color = getColorForValue(value, colorScale);
         let alpha = baseOpacity; // Zoom-aware opacity
 
-        // Check for contour using pre-converted grid
+        // Check for contour using pre-converted grid (only at zoom >= 6)
         if (contourConfig) {
           const isContour = isContourPixel(
             convertedGrid,
@@ -610,9 +618,9 @@ export async function GET(
           );
 
           if (isContour) {
-            // Draw contour line (dark color, fully opaque)
-            color = [...contourConfig.color, 255];
-            alpha = 255;
+            // Draw contour line with semi-transparent styling
+            color = [...contourConfig.color];
+            alpha = contourConfig.opacity;
           }
         }
 
@@ -624,8 +632,8 @@ export async function GET(
       }
     }
 
-    // Zoom-aware blur - stronger at low zoom for cleaner appearance
-    const blurRadius = getBlurRadiusForZoom(z);
+    // Post-render blur - stronger at low zoom for clean continuous appearance
+    const blurRadius = getPostBlurRadius(z);
 
     // Encode to PNG with zoom-appropriate smoothing
     const outputPng = await sharp(outputBuffer, {
