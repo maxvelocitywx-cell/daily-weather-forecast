@@ -117,6 +117,13 @@ export default function HomePage() {
             <span className="text-base">🌐</span>
             Models
           </Link>
+          <Link
+            href="/wssi-winter"
+            className="px-4 py-2 rounded-md text-sm font-medium transition-all text-mv-text-muted hover:text-mv-text-primary hover:bg-white/5 flex items-center gap-2"
+          >
+            <span className="text-base">❄️</span>
+            WSSI Winter
+          </Link>
         </div>
       </div>
 
