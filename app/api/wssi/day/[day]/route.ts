@@ -3,6 +3,7 @@ import * as turf from '@turf/turf';
 import type { Feature, Polygon, MultiPolygon, FeatureCollection, Geometry } from 'geojson';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 export const revalidate = 300; // 5 minute cache
 
 // ArcGIS MapServer layer IDs for Overall Impact

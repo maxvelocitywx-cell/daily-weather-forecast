@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "vercel-build": "echo 'Node:' && node -v && echo 'NPM:' && npm -v && next build",
     "start": "next start",
     "lint": "eslint"
   },
@@ -30,6 +31,7 @@
     "react-dom": "19.2.3",
     "react-window": "^2.2.4",
     "recharts": "^3.6.0",
+    "sharp": "^0.33.5",
     "swr": "^2.2.5"
   },
   "devDependencies": {
