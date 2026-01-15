@@ -1,30 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
-import AdmZip from 'adm-zip';
-import * as togeojson from '@mapbox/togeojson';
-import { DOMParser } from '@xmldom/xmldom';
 import * as turf from '@turf/turf';
 
 export const runtime = 'nodejs';
 export const revalidate = 300; // 5 minute cache
 
-// WSSI KMZ URLs - Overall Winter Storm Impacts only
-const WSSI_KMZ_URLS: Record<number, string> = {
-  1: 'https://www.wpc.ncep.noaa.gov/wwd/wssi/gis/kmz/wssi_overall_day1.kmz',
-  2: 'https://www.wpc.ncep.noaa.gov/wwd/wssi/gis/kmz/wssi_overall_day2.kmz',
-  3: 'https://www.wpc.ncep.noaa.gov/wwd/wssi/gis/kmz/wssi_overall_day3.kmz',
+// ArcGIS MapServer layer IDs for Overall Impact
+const WSSI_LAYER_IDS: Record<number, number> = {
+  1: 1, // Overall_Impact_Day_1
+  2: 2, // Overall_Impact_Day_2
+  3: 3, // Overall_Impact_Day_3
 };
+
+const MAPSERVER_BASE = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/wpc_wssi/MapServer';
 
 // Map WSSI categories to custom risk labels
 const WSSI_TO_RISK_MAP: Record<string, string> = {
+  'elevated': 'Marginal Risk',
   'winter weather area': 'Marginal Risk',
-  'minor impacts': 'Slight Risk',
   'minor': 'Slight Risk',
-  'moderate impacts': 'Enhanced Risk',
+  'minor impacts': 'Slight Risk',
   'moderate': 'Enhanced Risk',
-  'major impacts': 'Moderate Risk',
+  'moderate impacts': 'Enhanced Risk',
   'major': 'Moderate Risk',
-  'extreme impacts': 'High Risk',
+  'major impacts': 'Moderate Risk',
   'extreme': 'High Risk',
+  'extreme impacts': 'High Risk',
 };
 
 // Risk colors
@@ -121,83 +121,61 @@ function smoothGeometry(geometry: GeoJSON.Geometry): GeoJSON.Geometry {
  * Extract WSSI impact level from feature properties
  */
 function extractImpactLevel(properties: Record<string, unknown>): string {
-  // Try various property names that might contain the impact level
-  const possibleProps = ['name', 'Name', 'description', 'Description', 'styleUrl', 'WSSI', 'Impact', 'Level'];
+  // ArcGIS returns 'label' or 'Label' with the impact level
+  const possibleProps = ['label', 'Label', 'LABEL', 'name', 'Name', 'idp_wssilabel'];
 
   for (const prop of possibleProps) {
     if (properties[prop]) {
-      const value = String(properties[prop]).toLowerCase();
+      const value = String(properties[prop]).toLowerCase().trim();
 
+      // Direct match first
       for (const [wssiLabel, riskLabel] of Object.entries(WSSI_TO_RISK_MAP)) {
-        if (value.includes(wssiLabel)) {
+        if (value === wssiLabel || value.includes(wssiLabel)) {
           return riskLabel;
         }
       }
     }
   }
 
-  // Try to extract from styleUrl (common in KML)
-  if (properties.styleUrl) {
-    const styleUrl = String(properties.styleUrl).toLowerCase();
-    if (styleUrl.includes('extreme')) return 'High Risk';
-    if (styleUrl.includes('major')) return 'Moderate Risk';
-    if (styleUrl.includes('moderate')) return 'Enhanced Risk';
-    if (styleUrl.includes('minor')) return 'Slight Risk';
-    if (styleUrl.includes('winter') || styleUrl.includes('elevated')) return 'Marginal Risk';
-  }
-
   return 'Marginal Risk'; // Default
 }
 
 /**
- * Process KMZ file and return smoothed GeoJSON
+ * Fetch WSSI data from ArcGIS MapServer
  */
-async function processWSSIKmz(day: number): Promise<{ geojson: GeoJSON.FeatureCollection; lastModified: string }> {
-  const url = WSSI_KMZ_URLS[day];
-  if (!url) {
+async function fetchWSSIFromMapServer(day: number): Promise<{ geojson: GeoJSON.FeatureCollection; lastModified: string }> {
+  const layerId = WSSI_LAYER_IDS[day];
+  if (!layerId) {
     throw new Error(`Invalid day: ${day}`);
   }
 
-  // Fetch KMZ file
-  const response = await fetch(url, {
+  // Query the layer for all features as GeoJSON
+  const queryUrl = `${MAPSERVER_BASE}/${layerId}/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`;
+
+  const response = await fetch(queryUrl, {
     headers: {
       'User-Agent': 'maxvelocitywx.com',
     },
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch WSSI KMZ: ${response.status}`);
+    throw new Error(`Failed to fetch WSSI data: ${response.status}`);
   }
 
   const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  const data = await response.json() as GeoJSON.FeatureCollection;
 
-  // Unzip KMZ
-  const zip = new AdmZip(buffer);
-  const entries = zip.getEntries();
-
-  let kmlContent: string | null = null;
-  for (const entry of entries) {
-    if (entry.entryName.endsWith('.kml')) {
-      kmlContent = entry.getData().toString('utf8');
-      break;
-    }
+  if (!data.features || data.features.length === 0) {
+    return {
+      geojson: { type: 'FeatureCollection', features: [] },
+      lastModified,
+    };
   }
-
-  if (!kmlContent) {
-    throw new Error('No KML file found in KMZ');
-  }
-
-  // Parse KML to GeoJSON
-  const parser = new DOMParser();
-  const kmlDoc = parser.parseFromString(kmlContent, 'text/xml');
-  const geojson = togeojson.kml(kmlDoc) as GeoJSON.FeatureCollection;
 
   // Process features: simplify, smooth, and normalize attributes
   const processedFeatures: GeoJSON.Feature[] = [];
 
-  for (const feature of geojson.features) {
+  for (const feature of data.features) {
     if (!feature.geometry) continue;
 
     // Only process Polygon and MultiPolygon geometries
@@ -208,12 +186,11 @@ async function processWSSIKmz(day: number): Promise<{ geojson: GeoJSON.FeatureCo
     try {
       // Step 1: Simplify to remove jagged grid edges
       let simplified = turf.simplify(feature as turf.AllGeoJSON, {
-        tolerance: 0.005, // Adjust tolerance for smoothness
+        tolerance: 0.005,
         highQuality: true,
       }) as GeoJSON.Feature;
 
       // Step 2: Apply buffer trick to round sharp corners
-      // Buffer out slightly, then back in
       try {
         const bufferedOut = turf.buffer(simplified, 0.5, { units: 'kilometers' });
         if (bufferedOut) {
@@ -230,8 +207,8 @@ async function processWSSIKmz(day: number): Promise<{ geojson: GeoJSON.FeatureCo
       const smoothedGeometry = smoothGeometry(simplified.geometry!);
 
       // Extract and normalize properties
-      const originalProperties = feature.properties || {};
-      const originalLabel = String(originalProperties.name || originalProperties.Name || 'Unknown');
+      const originalProperties = (feature.properties || {}) as Record<string, unknown>;
+      const originalLabel = String(originalProperties.label || originalProperties.Label || originalProperties.idp_wssilabel || 'Unknown');
       const riskLabel = extractImpactLevel(originalProperties);
       const riskColor = RISK_COLORS[riskLabel] || '#60A5FA';
       const riskOrder = RISK_ORDER[riskLabel] || 1;
@@ -296,7 +273,7 @@ export async function GET(
   }
 
   try {
-    const { geojson, lastModified } = await processWSSIKmz(day);
+    const { geojson, lastModified } = await fetchWSSIFromMapServer(day);
 
     // Update cache
     wssiCache.set(cacheKey, {
