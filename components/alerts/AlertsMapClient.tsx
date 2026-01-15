@@ -8,14 +8,23 @@ import { Maximize2, Play, Pause, SkipBack, SkipForward } from 'lucide-react';
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
 
-// MRMS Radar Animation Config
+// MRMS Base Reflectivity Radar Animation Config
 const RADAR_FRAME_COUNT = 13; // 13 frames = 60 minutes at 5-min intervals
 const RADAR_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
 const ANIMATION_SPEED_MS = 700; // Time between frames when playing
 const RADAR_OPACITY = 0.65;
 
-// NOAA MRMS ImageServer base URL
+// NOAA MRMS ImageServer base URL (base reflectivity)
 const MRMS_BASE_URL = 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/radar/radar_base_reflectivity_time/ImageServer';
+
+// MRMS Precipitation Type (p-type) Animation Config
+const PTYPE_FRAME_COUNT = 25; // 25 frames = 120 minutes at 5-min intervals
+const PTYPE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
+const PTYPE_ANIMATION_SPEED_MS = 750; // Time between frames when playing
+const PTYPE_OPACITY = 0.70;
+
+// NOAA OpenGeo WMS endpoint for CONUS precip type
+const PTYPE_WMS_BASE = 'https://opengeo.ncep.noaa.gov/geoserver/conus/conus_pcpn_typ/ows';
 
 // Event-based color mapping (keyed by event string)
 const EVENT_COLORS: Record<string, string> = {
@@ -193,11 +202,49 @@ function generateRadarFrames(): { timestamp: number; label: string }[] {
   return frames.reverse(); // Oldest first, newest last
 }
 
-// Build MRMS tile URL for a specific timestamp
+// Generate p-type frame timestamps (25 frames = 120 min at 5-min intervals)
+function generatePtypeFrames(): { timestamp: number; isoUtc: string; label: string }[] {
+  const now = Date.now();
+  // Round down to nearest 5 minutes
+  const roundedNow = Math.floor(now / PTYPE_INTERVAL_MS) * PTYPE_INTERVAL_MS;
+
+  const frames: { timestamp: number; isoUtc: string; label: string }[] = [];
+  for (let i = 0; i < PTYPE_FRAME_COUNT; i++) {
+    const timestamp = roundedNow - (i * PTYPE_INTERVAL_MS);
+    const date = new Date(timestamp);
+    // ISO-8601 UTC format for WMS time parameter
+    const isoUtc = date.toISOString().replace('.000Z', 'Z');
+    // Short label: HH:MMZ
+    const label = `${date.getUTCHours().toString().padStart(2, '0')}:${date.getUTCMinutes().toString().padStart(2, '0')}Z`;
+    frames.push({ timestamp, isoUtc, label });
+  }
+
+  return frames.reverse(); // Oldest first, newest last
+}
+
+// Build MRMS tile URL for a specific timestamp (base reflectivity)
 function buildRadarTileUrl(timestamp: number): string {
   // Use WMS export endpoint with time parameter
   // Format: exportImage with bbox from tile coordinates
   return `${MRMS_BASE_URL}/exportImage?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&time=${timestamp}&f=image`;
+}
+
+// Build p-type WMS tile URL for a specific timestamp
+function buildPtypeTileUrl(isoUtc: string): string {
+  const params = new URLSearchParams({
+    service: 'WMS',
+    request: 'GetMap',
+    version: '1.1.1',
+    layers: 'conus_pcpn_typ',
+    styles: '',
+    format: 'image/png',
+    transparent: 'true',
+    srs: 'EPSG:3857',
+    width: '256',
+    height: '256',
+    time: isoUtc
+  });
+  return `${PTYPE_WMS_BASE}?${params.toString()}&bbox={bbox-epsg-3857}`;
 }
 
 export interface AlertGeometry {
@@ -269,20 +316,30 @@ export default function AlertsMapClient({
   const [mapLoaded, setMapLoaded] = useState(false);
   const [legendExpanded, setLegendExpanded] = useState(false);
 
-  // Radar animation state
+  // Radar animation state (base reflectivity)
   const [radarEnabled, setRadarEnabled] = useState(true);
   const [radarPlaying, setRadarPlaying] = useState(true);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(RADAR_FRAME_COUNT - 1); // Start at newest
   const [radarFrames, setRadarFrames] = useState<{ timestamp: number; label: string }[]>([]);
   const [radarLayersReady, setRadarLayersReady] = useState(false);
 
+  // P-type radar animation state
+  const [ptypeEnabled, setPtypeEnabled] = useState(false);
+  const [ptypePlaying, setPtypePlaying] = useState(true);
+  const [currentPtypeFrameIndex, setCurrentPtypeFrameIndex] = useState(PTYPE_FRAME_COUNT - 1); // Start at newest
+  const [ptypeFrames, setPtypeFrames] = useState<{ timestamp: number; isoUtc: string; label: string }[]>([]);
+  const [ptypeLayersReady, setPtypeLayersReady] = useState(false);
+  const ptypeAnimationRef = useRef<NodeJS.Timeout | null>(null);
+
   // Generate radar frames on mount
   useEffect(() => {
     setRadarFrames(generateRadarFrames());
+    setPtypeFrames(generatePtypeFrames());
 
     // Refresh frames every 5 minutes
     const refreshInterval = setInterval(() => {
       setRadarFrames(generateRadarFrames());
+      setPtypeFrames(generatePtypeFrames());
     }, RADAR_INTERVAL_MS);
 
     return () => clearInterval(refreshInterval);
@@ -370,6 +427,9 @@ export default function AlertsMapClient({
       if (animationRef.current) {
         clearInterval(animationRef.current);
       }
+      if (ptypeAnimationRef.current) {
+        clearInterval(ptypeAnimationRef.current);
+      }
       map.current?.remove();
       map.current = null;
     };
@@ -418,6 +478,40 @@ export default function AlertsMapClient({
     setRadarLayersReady(true);
   }, [mapLoaded, radarFrames, getFirstSymbolLayerId]);
 
+  // Add p-type radar layers (one per frame)
+  useEffect(() => {
+    if (!mapLoaded || !map.current || ptypeFrames.length === 0) return;
+
+    const firstSymbolId = getFirstSymbolLayerId();
+
+    // Add p-type sources and layers for each frame
+    ptypeFrames.forEach((frame, index) => {
+      const sourceId = `ptype-source-${index}`;
+      const layerId = `ptype-layer-${index}`;
+
+      if (!map.current?.getSource(sourceId)) {
+        map.current?.addSource(sourceId, {
+          type: 'raster',
+          tiles: [buildPtypeTileUrl(frame.isoUtc)],
+          tileSize: 256,
+          attribution: 'NOAA MRMS P-Type'
+        });
+
+        map.current?.addLayer({
+          id: layerId,
+          type: 'raster',
+          source: sourceId,
+          paint: {
+            'raster-opacity': index === currentPtypeFrameIndex && ptypeEnabled ? PTYPE_OPACITY : 0,
+            'raster-fade-duration': 0
+          }
+        }, firstSymbolId); // Insert below labels
+      }
+    });
+
+    setPtypeLayersReady(true);
+  }, [mapLoaded, ptypeFrames, getFirstSymbolLayerId]);
+
   // Update radar layer visibility when frame changes
   useEffect(() => {
     if (!mapLoaded || !map.current || !radarLayersReady) return;
@@ -434,7 +528,23 @@ export default function AlertsMapClient({
     });
   }, [mapLoaded, radarLayersReady, currentFrameIndex, radarEnabled, radarFrames]);
 
-  // Animation loop
+  // Update p-type layer visibility when frame changes
+  useEffect(() => {
+    if (!mapLoaded || !map.current || !ptypeLayersReady) return;
+
+    ptypeFrames.forEach((_, index) => {
+      const layerId = `ptype-layer-${index}`;
+      if (map.current?.getLayer(layerId)) {
+        map.current.setPaintProperty(
+          layerId,
+          'raster-opacity',
+          index === currentPtypeFrameIndex && ptypeEnabled ? PTYPE_OPACITY : 0
+        );
+      }
+    });
+  }, [mapLoaded, ptypeLayersReady, currentPtypeFrameIndex, ptypeEnabled, ptypeFrames]);
+
+  // Animation loop for base reflectivity radar
   useEffect(() => {
     if (!radarPlaying || !radarEnabled || !radarLayersReady) {
       if (animationRef.current) {
@@ -456,7 +566,29 @@ export default function AlertsMapClient({
     };
   }, [radarPlaying, radarEnabled, radarLayersReady]);
 
-  // Radar controls
+  // Animation loop for p-type radar
+  useEffect(() => {
+    if (!ptypePlaying || !ptypeEnabled || !ptypeLayersReady) {
+      if (ptypeAnimationRef.current) {
+        clearInterval(ptypeAnimationRef.current);
+        ptypeAnimationRef.current = null;
+      }
+      return;
+    }
+
+    ptypeAnimationRef.current = setInterval(() => {
+      setCurrentPtypeFrameIndex(prev => (prev + 1) % PTYPE_FRAME_COUNT);
+    }, PTYPE_ANIMATION_SPEED_MS);
+
+    return () => {
+      if (ptypeAnimationRef.current) {
+        clearInterval(ptypeAnimationRef.current);
+        ptypeAnimationRef.current = null;
+      }
+    };
+  }, [ptypePlaying, ptypeEnabled, ptypeLayersReady]);
+
+  // Radar controls (base reflectivity)
   const handlePlayPause = useCallback(() => {
     setRadarPlaying(prev => !prev);
   }, []);
@@ -478,6 +610,30 @@ export default function AlertsMapClient({
 
   const toggleRadar = useCallback(() => {
     setRadarEnabled(prev => !prev);
+  }, []);
+
+  // P-type radar controls
+  const handlePtypePlayPause = useCallback(() => {
+    setPtypePlaying(prev => !prev);
+  }, []);
+
+  const handlePtypeStepBack = useCallback(() => {
+    setPtypePlaying(false);
+    setCurrentPtypeFrameIndex(prev => (prev - 1 + PTYPE_FRAME_COUNT) % PTYPE_FRAME_COUNT);
+  }, []);
+
+  const handlePtypeStepForward = useCallback(() => {
+    setPtypePlaying(false);
+    setCurrentPtypeFrameIndex(prev => (prev + 1) % PTYPE_FRAME_COUNT);
+  }, []);
+
+  const handlePtypeSliderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setPtypePlaying(false);
+    setCurrentPtypeFrameIndex(parseInt(e.target.value, 10));
+  }, []);
+
+  const togglePtype = useCallback(() => {
+    setPtypeEnabled(prev => !prev);
   }, []);
 
   // Add/update alert layers - ONLY fill and line layers, NO point/circle/symbol layers
@@ -585,6 +741,14 @@ export default function AlertsMapClient({
         }
       });
 
+      // Move p-type layers below the first symbol layer
+      ptypeFrames.forEach((_, index) => {
+        const layerId = `ptype-layer-${index}`;
+        if (map.current?.getLayer(layerId)) {
+          map.current.moveLayer(layerId, firstSymbolId);
+        }
+      });
+
       // Move alert layers below the first symbol layer if they exist
       if (map.current.getLayer('alert-polygons-fill')) {
         map.current.moveLayer('alert-polygons-fill', firstSymbolId);
@@ -602,7 +766,7 @@ export default function AlertsMapClient({
     return () => {
       map.current?.off('styledata', handleStyleData);
     };
-  }, [getFirstSymbolLayerId, radarFrames]);
+  }, [getFirstSymbolLayerId, radarFrames, ptypeFrames]);
 
   // Handle selection state
   useEffect(() => {
@@ -849,6 +1013,7 @@ export default function AlertsMapClient({
   }, [alerts]);
 
   const currentFrameLabel = radarFrames[currentFrameIndex]?.label || '';
+  const currentPtypeFrameLabel = ptypeFrames[currentPtypeFrameIndex]?.label || '';
 
   return (
     <div className="relative w-full rounded-xl overflow-hidden border border-white/10" style={{ height }}>
@@ -878,6 +1043,20 @@ export default function AlertsMapClient({
         >
           <div className={`w-2 h-2 rounded-full ${radarEnabled ? 'bg-green-500' : 'bg-gray-500'}`} />
           <span className="text-xs text-mv-text-secondary">Radar</span>
+        </button>
+
+        {/* P-type toggle */}
+        <button
+          onClick={togglePtype}
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+            ptypeEnabled
+              ? 'bg-purple-500/20 border-purple-500/50 hover:border-purple-500'
+              : 'bg-mv-bg-secondary/90 border-white/10 hover:border-white/20'
+          }`}
+          title={ptypeEnabled ? 'Hide precip type' : 'Show precip type'}
+        >
+          <div className={`w-2 h-2 rounded-full ${ptypeEnabled ? 'bg-purple-500' : 'bg-gray-500'}`} />
+          <span className="text-xs text-mv-text-secondary">P-Type</span>
         </button>
       </div>
 
@@ -948,6 +1127,100 @@ export default function AlertsMapClient({
           <div className="flex justify-between text-[9px] text-mv-text-muted">
             <span>-60 min</span>
             <span>Now</span>
+          </div>
+        </div>
+      )}
+
+      {/* P-type animation controls */}
+      {ptypeEnabled && ptypeLayersReady && (
+        <div className="absolute bottom-3 left-3 bg-mv-bg-secondary/95 backdrop-blur-sm rounded-lg border border-white/10 p-2 z-10" style={{ maxWidth: '220px' }}>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-medium text-mv-text-primary">P-Type</span>
+            <span className="text-[11px] text-purple-400 font-mono">{currentPtypeFrameLabel}</span>
+          </div>
+
+          {/* Playback controls */}
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <button
+              onClick={handlePtypeStepBack}
+              className="p-1 rounded bg-white/5 hover:bg-white/10 transition-colors"
+              title="Step back"
+            >
+              <SkipBack size={12} className="text-mv-text-secondary" />
+            </button>
+
+            <button
+              onClick={handlePtypePlayPause}
+              className="p-1.5 rounded-full bg-purple-500/20 hover:bg-purple-500/30 transition-colors"
+              title={ptypePlaying ? 'Pause' : 'Play'}
+            >
+              {ptypePlaying ? (
+                <Pause size={14} className="text-purple-400" />
+              ) : (
+                <Play size={14} className="text-purple-400 ml-0.5" />
+              )}
+            </button>
+
+            <button
+              onClick={handlePtypeStepForward}
+              className="p-1 rounded bg-white/5 hover:bg-white/10 transition-colors"
+              title="Step forward"
+            >
+              <SkipForward size={12} className="text-mv-text-secondary" />
+            </button>
+
+            <div className="flex-1 ml-1.5">
+              <input
+                type="range"
+                min={0}
+                max={PTYPE_FRAME_COUNT - 1}
+                value={currentPtypeFrameIndex}
+                onChange={handlePtypeSliderChange}
+                className="w-full h-1 bg-white/10 rounded-full appearance-none cursor-pointer
+                  [&::-webkit-slider-thumb]:appearance-none
+                  [&::-webkit-slider-thumb]:w-2.5
+                  [&::-webkit-slider-thumb]:h-2.5
+                  [&::-webkit-slider-thumb]:rounded-full
+                  [&::-webkit-slider-thumb]:bg-purple-400
+                  [&::-webkit-slider-thumb]:cursor-pointer
+                  [&::-webkit-slider-thumb]:hover:bg-purple-300
+                  [&::-moz-range-thumb]:w-2.5
+                  [&::-moz-range-thumb]:h-2.5
+                  [&::-moz-range-thumb]:rounded-full
+                  [&::-moz-range-thumb]:bg-purple-400
+                  [&::-moz-range-thumb]:border-0
+                  [&::-moz-range-thumb]:cursor-pointer"
+              />
+            </div>
+          </div>
+
+          {/* Time labels */}
+          <div className="flex justify-between text-[8px] text-mv-text-muted mb-2">
+            <span>-120 min</span>
+            <span>Now</span>
+          </div>
+
+          {/* P-type legend */}
+          <div className="border-t border-white/10 pt-1.5">
+            <div className="text-[9px] text-mv-text-muted mb-1">Precip Type</div>
+            <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[9px]">
+              <div className="flex items-center gap-1">
+                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#00FF00' }} />
+                <span className="text-mv-text-secondary">Rain</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#FF69B4' }} />
+                <span className="text-mv-text-secondary">Mix</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#FF0000' }} />
+                <span className="text-mv-text-secondary">Frzn</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: '#00BFFF' }} />
+                <span className="text-mv-text-secondary">Snow</span>
+              </div>
+            </div>
           </div>
         </div>
       )}
