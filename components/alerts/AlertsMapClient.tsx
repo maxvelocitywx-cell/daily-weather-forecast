@@ -11,7 +11,7 @@ mapboxgl.accessToken = MAPBOX_TOKEN;
 // Unified Radar Animation Config (both modes use same timing)
 const FRAME_COUNT = 25; // 25 frames = 120 minutes at 5-min intervals
 const FRAME_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in ms
-const ANIMATION_SPEED_MS = 300; // Fast loop ~300ms per frame
+const ANIMATION_SPEED_MS = 250; // Fast loop 250ms per frame
 const RADAR_OPACITY = 0.95;
 
 // NOAA MRMS ImageServer base URL (base reflectivity)
@@ -1005,24 +1005,24 @@ export default function AlertsMapClient({
           <div className="border-t border-white/10 mt-2 pt-2">
             <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px]">
               <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #93C5FD, #1E3A8A)' }} />
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #93C5FD, #1E40AF)' }} />
                 <span className="text-mv-text-secondary">Snow</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #FBCFE8, #BE185D)' }} />
-                <span className="text-mv-text-secondary">Mix</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #DDD6FE, #6D28D9)' }} />
-                <span className="text-mv-text-secondary">Frzn</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #E9D5FF, #7E22CE)' }} />
-                <span className="text-mv-text-secondary">Sleet</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #BBF7D0, #15803D)' }} />
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #86EFAC, #166534)' }} />
                 <span className="text-mv-text-secondary">Rain</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #A7F3D0, #065F46)' }} />
+                <span className="text-mv-text-secondary">Cool</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #FDE047, #A16207)' }} />
+                <span className="text-mv-text-secondary">Conv</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-sm" style={{ background: 'linear-gradient(to right, #FBCFE8, #9D174D)' }} />
+                <span className="text-mv-text-secondary">Hail</span>
               </div>
             </div>
           </div>
