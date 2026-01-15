@@ -81,6 +81,7 @@ const EVENT_BOOST: Record<string, number> = {
   'Heat Advisory': 5,
   'Freeze Warning': 5,
   'Winter Weather Advisory': 5,
+  'Special Weather Statement': 3,
   'Wind Advisory': 3,
   'Coastal Flood Warning': 8,
   'Frost Advisory': 2,
