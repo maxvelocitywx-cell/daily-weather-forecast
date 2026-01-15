@@ -165,7 +165,16 @@ export default function ModelsClient() {
     return firstSymbol?.id;
   }, []);
 
-  // Initialize double-buffered layers
+  // Update source tiles helper (defined before effects that use it)
+  const updateSourceTiles = useCallback((sourceId: string, newUrl: string) => {
+    if (!map.current) return;
+    const source = map.current.getSource(sourceId) as mapboxgl.RasterTileSource;
+    if (source && typeof source.setTiles === 'function') {
+      source.setTiles([newUrl]);
+    }
+  }, []);
+
+  // Initialize double-buffered layers (once on map load)
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
 
@@ -173,16 +182,37 @@ export default function ModelsClient() {
     const firstSymbolId = getFirstSymbolLayerId();
     const buffers = ['A', 'B'] as const;
 
-    // Remove existing layers if any
-    for (const buffer of buffers) {
-      const layerId = `model-layer-${buffer}`;
-      const sourceId = `model-source-${buffer}`;
-      if (m.getLayer(layerId)) m.removeLayer(layerId);
-      if (m.getSource(sourceId)) m.removeSource(sourceId);
+    // Only create layers if they don't exist (never remove/re-add)
+    const sourceAExists = m.getSource('model-source-A');
+    if (sourceAExists) {
+      // Layers already exist, just update tiles
+      const initialUrl = buildTileUrl(forecastHour);
+      updateSourceTiles('model-source-A', initialUrl);
+      updateSourceTiles('model-source-B', initialUrl);
+
+      // Reset buffer state
+      bufferStateRef.current = {
+        activeBuffer: 'A',
+        bufferAHour: forecastHour,
+        bufferBHour: forecastHour,
+        isTransitioning: false,
+      };
+
+      // Reset opacities
+      if (m.getLayer('model-layer-A')) {
+        m.setPaintProperty('model-layer-A', 'raster-opacity', MODEL_OPACITY);
+      }
+      if (m.getLayer('model-layer-B')) {
+        m.setPaintProperty('model-layer-B', 'raster-opacity', 0);
+      }
+
+      setLayersReady(true);
+      return;
     }
 
-    // Create new sources and layers
+    // Create new sources and layers (first time only)
     const initialUrl = buildTileUrl(forecastHour);
+    const modelMaxZoom = selectedModel.maxZoom || 8;
 
     for (const buffer of buffers) {
       const sourceId = `model-source-${buffer}`;
@@ -192,15 +222,18 @@ export default function ModelsClient() {
         type: 'raster',
         tiles: [initialUrl],
         tileSize: 256,
+        maxzoom: modelMaxZoom,
       });
 
       m.addLayer({
         id: layerId,
         type: 'raster',
         source: sourceId,
+        maxzoom: modelMaxZoom + 2, // Allow some overzooming with linear resampling
         paint: {
           'raster-opacity': buffer === 'A' ? MODEL_OPACITY : 0,
           'raster-fade-duration': 0,
+          'raster-resampling': 'linear', // Smooth bilinear interpolation
         },
       }, firstSymbolId);
     }
@@ -213,16 +246,43 @@ export default function ModelsClient() {
     };
 
     setLayersReady(true);
-  }, [mapLoaded, selectedModel, selectedVariable, selectedRun, getFirstSymbolLayerId, buildTileUrl, forecastHour]);
+  }, [mapLoaded, getFirstSymbolLayerId]);
 
-  // Update source tiles
-  const updateSourceTiles = useCallback((sourceId: string, newUrl: string) => {
-    if (!map.current) return;
-    const source = map.current.getSource(sourceId) as mapboxgl.RasterTileSource;
-    if (source && typeof source.setTiles === 'function') {
-      source.setTiles([newUrl]);
+  // Update tiles when model/variable/run changes (without recreating layers)
+  useEffect(() => {
+    if (!mapLoaded || !map.current || !layersReady) return;
+
+    const m = map.current;
+    const initialUrl = buildTileUrl(forecastHour);
+
+    // Update both buffers with new tile URL
+    updateSourceTiles('model-source-A', initialUrl);
+    updateSourceTiles('model-source-B', initialUrl);
+
+    // Reset opacities
+    if (m.getLayer('model-layer-A')) {
+      m.setPaintProperty('model-layer-A', 'raster-opacity', MODEL_OPACITY);
     }
-  }, []);
+    if (m.getLayer('model-layer-B')) {
+      m.setPaintProperty('model-layer-B', 'raster-opacity', 0);
+    }
+
+    // Update maxzoom for the model
+    const modelMaxZoom = selectedModel.maxZoom || 8;
+    if (m.getLayer('model-layer-A')) {
+      m.setLayerZoomRange('model-layer-A', 0, modelMaxZoom + 2);
+    }
+    if (m.getLayer('model-layer-B')) {
+      m.setLayerZoomRange('model-layer-B', 0, modelMaxZoom + 2);
+    }
+
+    bufferStateRef.current = {
+      activeBuffer: 'A',
+      bufferAHour: forecastHour,
+      bufferBHour: forecastHour,
+      isTransitioning: false,
+    };
+  }, [mapLoaded, layersReady, selectedModel, selectedVariable, selectedRun, buildTileUrl, forecastHour, updateSourceTiles]);
 
   // Wait for source to load
   const waitForSourceLoad = useCallback((sourceId: string, timeout = 3000): Promise<boolean> => {

@@ -189,57 +189,23 @@ export async function GET(
   }
 
   try {
-    // Determine grid resolution based on zoom level
-    // Higher zoom = more points needed for smooth rendering
-    const gridSize = Math.min(64, Math.max(16, Math.pow(2, Math.min(z, 6))));
-
-    // Create grid of lat/lon points
-    const latStep = (bounds.north - bounds.south) / (gridSize - 1);
-    const lonStep = (bounds.east - bounds.west) / (gridSize - 1);
-
-    const latitudes: number[] = [];
-    const longitudes: number[] = [];
-
-    for (let i = 0; i < gridSize; i++) {
-      latitudes.push(bounds.north - i * latStep);
-      longitudes.push(bounds.west + i * lonStep);
-    }
-
     // Build Open-Meteo API URL
-    // We'll fetch a grid of points for this tile
     const apiEndpoint = model.openMeteoApiEndpoint || 'forecast';
     const baseUrl = `https://customer-api.open-meteo.com/v1/${apiEndpoint}`;
 
-    // For grid data, we need to make multiple requests or use their grid endpoint
-    // Open-Meteo doesn't have a native grid endpoint, so we'll sample strategically
+    // Create 3x3 grid of sample points for smoother interpolation
+    const sampleLatStep = (bounds.north - bounds.south) / 2;
+    const sampleLonStep = (bounds.east - bounds.west) / 2;
 
-    // Sample center point to get data availability
-    const centerLat = (bounds.north + bounds.south) / 2;
-    const centerLon = (bounds.west + bounds.east) / 2;
-
-    const apiParams = new URLSearchParams({
-      latitude: centerLat.toFixed(4),
-      longitude: centerLon.toFixed(4),
-      hourly: variable,
-      forecast_hours: (forecastHour + 1).toString(),
-      apikey: OPEN_METEO_API_KEY,
-    });
-
-    if (model.openMeteoModel) {
-      apiParams.set('models', model.openMeteoModel);
+    const samplePoints: { lat: number; lon: number }[] = [];
+    for (let i = 0; i <= 2; i++) {
+      for (let j = 0; j <= 2; j++) {
+        samplePoints.push({
+          lat: bounds.north - i * sampleLatStep,
+          lon: bounds.west + j * sampleLonStep,
+        });
+      }
     }
-
-    // For a proper implementation, we'd need to fetch multiple points
-    // For now, let's create a gradient tile based on a grid sample
-
-    // Create multiple point requests (simplified - in production use batch API)
-    const samplePoints = [
-      { lat: bounds.north, lon: bounds.west },
-      { lat: bounds.north, lon: bounds.east },
-      { lat: bounds.south, lon: bounds.west },
-      { lat: bounds.south, lon: bounds.east },
-      { lat: centerLat, lon: centerLon },
-    ];
 
     const samplePromises = samplePoints.map(async (point) => {
       try {
@@ -332,7 +298,7 @@ export async function GET(
       }
     }
 
-    // Encode to PNG with smoothing
+    // Encode to PNG with smoothing (stronger blur for smoother appearance)
     const outputPng = await sharp(outputBuffer, {
       raw: {
         width: tileSize,
@@ -340,7 +306,7 @@ export async function GET(
         channels: 4,
       },
     })
-      .blur(1.5) // Smooth the interpolation artifacts
+      .blur(2.5) // Stronger blur to smooth interpolation artifacts
       .png()
       .toBuffer();
 
