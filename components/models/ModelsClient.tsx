@@ -221,7 +221,7 @@ export default function ModelsClient() {
       m.addSource(sourceId, {
         type: 'raster',
         tiles: [initialUrl],
-        tileSize: 256,
+        tileSize: 512, // Higher res tiles for smoother appearance
         maxzoom: modelMaxZoom,
       });
 
