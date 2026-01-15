@@ -10,17 +10,22 @@ const OPEN_METEO_API_KEY = 'yH4W7Ms6acRVmSnd';
 const tileCache = new Map<string, { data: Buffer; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// Tile size - 512 for smoother results
+// High-resolution tile size
 const TILE_SIZE = 512;
 
-// Grid sampling resolution - how many points to fetch per tile
-const GRID_SIZE = 8; // 8x8 grid = 64 API calls per tile
+// Maximum density grid sampling for silky-smooth interpolation
+// 32x32 grid = 1024 sample points per tile, fetched in parallel
+// This provides near-continuous gradients even at high zoom
+const GRID_SIZE = 32;
 
-// Contour configuration
+// Chunk size for API requests - larger chunks = fewer requests = faster
+const API_CHUNK_SIZE = 100;
+
+// Contour configuration - tighter intervals for professional look
 const CONTOUR_INTERVALS: Record<string, { interval: number; color: number[]; width: number }> = {
-  temperature: { interval: 10, color: [0, 0, 0], width: 1 }, // Every 10°F
-  pressure: { interval: 4, color: [0, 0, 0], width: 1 }, // Every 4mb
-  heights: { interval: 60, color: [0, 0, 0], width: 1 }, // Every 60m (500mb)
+  temperature: { interval: 2, color: [30, 30, 30], width: 1 }, // Every 2°F
+  pressure: { interval: 4, color: [30, 30, 30], width: 1 }, // Every 4mb
+  heights: { interval: 60, color: [30, 30, 30], width: 1 }, // Every 60m (500mb)
 };
 
 // Convert tile coordinates to lat/lon bounds
@@ -89,7 +94,66 @@ function mmToInches(mm: number): number {
   return mm / 25.4;
 }
 
-// Bilinear interpolation on a 2D grid
+// Cubic interpolation helper for bicubic
+function cubicInterpolate(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  // Catmull-Rom spline for smooth interpolation
+  const a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+  const b = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3;
+  const c = -0.5 * p0 + 0.5 * p2;
+  const d = p1;
+  return a * t * t * t + b * t * t + c * t + d;
+}
+
+// Bicubic interpolation on a 2D grid - produces smoother results than bilinear
+function bicubicInterpolate(
+  grid: (number | null)[][],
+  x: number,
+  y: number
+): number | null {
+  const gridHeight = grid.length;
+  const gridWidth = grid[0]?.length || 0;
+
+  if (gridWidth < 4 || gridHeight < 4) {
+    // Fall back to bilinear for small grids
+    return bilinearInterpolate(grid, x, y);
+  }
+
+  // Clamp to valid range with margin for bicubic
+  x = Math.max(1, Math.min(gridWidth - 2.001, x));
+  y = Math.max(1, Math.min(gridHeight - 2.001, y));
+
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const dx = x - x0;
+  const dy = y - y0;
+
+  // Get 4x4 neighborhood
+  const values: number[][] = [];
+  for (let j = -1; j <= 2; j++) {
+    const row: number[] = [];
+    for (let i = -1; i <= 2; i++) {
+      const val = grid[y0 + j]?.[x0 + i];
+      if (val === null) {
+        // Fall back to bilinear if any null values
+        return bilinearInterpolate(grid, x, y);
+      }
+      row.push(val);
+    }
+    values.push(row);
+  }
+
+  // Interpolate along x for each row, then along y
+  const col = [
+    cubicInterpolate(values[0][0], values[0][1], values[0][2], values[0][3], dx),
+    cubicInterpolate(values[1][0], values[1][1], values[1][2], values[1][3], dx),
+    cubicInterpolate(values[2][0], values[2][1], values[2][2], values[2][3], dx),
+    cubicInterpolate(values[3][0], values[3][1], values[3][2], values[3][3], dx),
+  ];
+
+  return cubicInterpolate(col[0], col[1], col[2], col[3], dy);
+}
+
+// Bilinear interpolation on a 2D grid (fallback for edges)
 function bilinearInterpolate(
   grid: (number | null)[][],
   x: number, // 0 to gridWidth-1 (fractional)
@@ -191,7 +255,7 @@ async function createTransparentTile(): Promise<Buffer> {
   }).png().toBuffer();
 }
 
-// Fetch grid data from Open-Meteo
+// Fetch grid data from Open-Meteo using bulk API
 async function fetchGridData(
   baseUrl: string,
   model: { openMeteoModel?: string },
@@ -202,9 +266,9 @@ async function fetchGridData(
 ): Promise<(number | null)[][]> {
   const grid: (number | null)[][] = [];
 
-  // Create grid of lat/lon points with some padding
-  const latPadding = (bounds.north - bounds.south) * 0.1;
-  const lonPadding = (bounds.east - bounds.west) * 0.1;
+  // Create grid of lat/lon points with padding for edge interpolation
+  const latPadding = (bounds.north - bounds.south) * 0.15;
+  const lonPadding = (bounds.east - bounds.west) * 0.15;
 
   const latMin = bounds.south - latPadding;
   const latMax = bounds.north + latPadding;
@@ -214,50 +278,97 @@ async function fetchGridData(
   const latStep = (latMax - latMin) / (gridSize - 1);
   const lonStep = (lonMax - lonMin) / (gridSize - 1);
 
-  // Create all sample points
-  const points: { lat: number; lon: number; row: number; col: number }[] = [];
+  // Initialize grid
   for (let row = 0; row < gridSize; row++) {
     grid[row] = new Array(gridSize).fill(null);
+  }
+
+  // Build arrays of coordinates for bulk request
+  const lats: number[] = [];
+  const lons: number[] = [];
+  const pointMap: { row: number; col: number }[] = [];
+
+  for (let row = 0; row < gridSize; row++) {
     for (let col = 0; col < gridSize; col++) {
-      points.push({
-        lat: latMax - row * latStep, // North to south
-        lon: lonMin + col * lonStep, // West to east
-        row,
-        col,
-      });
+      lats.push(latMax - row * latStep); // North to south
+      lons.push(lonMin + col * lonStep); // West to east
+      pointMap.push({ row, col });
     }
   }
 
-  // Fetch in parallel with concurrency limit
-  const BATCH_SIZE = 16;
-  for (let i = 0; i < points.length; i += BATCH_SIZE) {
-    const batch = points.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(
-      batch.map(async (point) => {
-        try {
-          const url = `${baseUrl}?latitude=${point.lat.toFixed(4)}&longitude=${point.lon.toFixed(4)}&hourly=${variable}&forecast_hours=${forecastHour + 1}&apikey=${OPEN_METEO_API_KEY}${model.openMeteoModel ? `&models=${model.openMeteoModel}` : ''}`;
+  // Open-Meteo supports bulk requests with comma-separated coords
+  // Split into chunks to manage URL length limits while maximizing throughput
+  const chunks: { lats: number[]; lons: number[]; indices: number[] }[] = [];
 
-          const response = await fetch(url, {
-            headers: { 'User-Agent': 'maxvelocitywx.com' },
-          });
+  for (let i = 0; i < lats.length; i += API_CHUNK_SIZE) {
+    chunks.push({
+      lats: lats.slice(i, i + API_CHUNK_SIZE),
+      lons: lons.slice(i, i + API_CHUNK_SIZE),
+      indices: Array.from({ length: Math.min(API_CHUNK_SIZE, lats.length - i) }, (_, j) => i + j),
+    });
+  }
 
-          if (!response.ok) return { ...point, value: null };
+  // Fetch all chunks in parallel
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      try {
+        const latStr = chunk.lats.map(l => l.toFixed(4)).join(',');
+        const lonStr = chunk.lons.map(l => l.toFixed(4)).join(',');
 
-          const data = await response.json();
+        const url = `${baseUrl}?latitude=${latStr}&longitude=${lonStr}&hourly=${variable}&forecast_hours=${forecastHour + 1}&apikey=${OPEN_METEO_API_KEY}${model.openMeteoModel ? `&models=${model.openMeteoModel}` : ''}`;
+
+        const response = await fetch(url, {
+          headers: { 'User-Agent': 'maxvelocitywx.com' },
+        });
+
+        if (!response.ok) return;
+
+        const data = await response.json();
+
+        // Handle both single and multiple location responses
+        if (Array.isArray(data)) {
+          // Multiple locations returned as array
+          for (let i = 0; i < data.length; i++) {
+            const pointIdx = chunk.indices[i];
+            const { row, col } = pointMap[pointIdx];
+            const values = data[i]?.hourly?.[variable];
+            grid[row][col] = values?.[forecastHour] ?? null;
+          }
+        } else if (data.hourly) {
+          // Single location (shouldn't happen with bulk but handle it)
+          const pointIdx = chunk.indices[0];
+          const { row, col } = pointMap[pointIdx];
           const values = data.hourly?.[variable];
-          const value = values?.[forecastHour] ?? null;
-
-          return { ...point, value };
-        } catch {
-          return { ...point, value: null };
+          grid[row][col] = values?.[forecastHour] ?? null;
         }
-      })
-    );
+      } catch (e) {
+        // If bulk fails, try individual requests as fallback
+        await Promise.all(
+          chunk.indices.map(async (idx) => {
+            try {
+              const lat = lats[idx];
+              const lon = lons[idx];
+              const { row, col } = pointMap[idx];
 
-    for (const result of results) {
-      grid[result.row][result.col] = result.value;
-    }
-  }
+              const url = `${baseUrl}?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&hourly=${variable}&forecast_hours=${forecastHour + 1}&apikey=${OPEN_METEO_API_KEY}${model.openMeteoModel ? `&models=${model.openMeteoModel}` : ''}`;
+
+              const response = await fetch(url, {
+                headers: { 'User-Agent': 'maxvelocitywx.com' },
+              });
+
+              if (!response.ok) return;
+
+              const data = await response.json();
+              const values = data.hourly?.[variable];
+              grid[row][col] = values?.[forecastHour] ?? null;
+            } catch {
+              // Ignore individual failures
+            }
+          })
+        );
+      }
+    })
+  );
 
   return grid;
 }
@@ -352,35 +463,47 @@ export async function GET(
     const gridHeight = gridData.length;
     const gridWidth = gridData[0]?.length || 0;
 
-    // Padding ratios (grid extends beyond tile bounds)
-    const latPaddingRatio = 0.1;
-    const lonPaddingRatio = 0.1;
+    // Padding ratios (grid extends beyond tile bounds) - must match fetchGridData
+    const paddingRatio = 0.15;
 
     // Map tile pixel to grid coordinate
+    // The grid covers [bounds - padding] to [bounds + padding]
+    // The tile covers just [bounds]
+    // So we need to map tile [0, TILE_SIZE] to grid portion that excludes padding
     const pixelToGridX = (px: number): number => {
       const tileRatio = px / TILE_SIZE; // 0 to 1 within tile
-      // Grid has padding on each side, so tile maps to middle portion
-      const gridRatioStart = lonPaddingRatio / (1 + 2 * lonPaddingRatio);
-      const gridRatioEnd = (1 + lonPaddingRatio) / (1 + 2 * lonPaddingRatio);
-      const gridRatio = gridRatioStart + tileRatio * (gridRatioEnd - gridRatioStart);
+      // Grid spans from -padding to 1+padding, tile maps to 0 to 1
+      const totalSpan = 1 + 2 * paddingRatio;
+      const gridRatio = (paddingRatio + tileRatio) / totalSpan;
       return gridRatio * (gridWidth - 1);
     };
 
     const pixelToGridY = (py: number): number => {
       const tileRatio = py / TILE_SIZE;
-      const gridRatioStart = latPaddingRatio / (1 + 2 * latPaddingRatio);
-      const gridRatioEnd = (1 + latPaddingRatio) / (1 + 2 * latPaddingRatio);
-      const gridRatio = gridRatioStart + tileRatio * (gridRatioEnd - gridRatioStart);
+      const totalSpan = 1 + 2 * paddingRatio;
+      const gridRatio = (paddingRatio + tileRatio) / totalSpan;
       return gridRatio * (gridHeight - 1);
     };
 
-    // Render each pixel with bilinear interpolation
+    // Pre-convert grid values for contour detection
+    const convertedGrid: (number | null)[][] = gridData.map(row =>
+      row.map(v => {
+        if (v === null) return null;
+        if (variable.includes('temperature') || variable.includes('dew_point') || variable.includes('apparent')) {
+          return celsiusToFahrenheit(v);
+        }
+        return v;
+      })
+    );
+
+    // Render each pixel with bicubic interpolation for maximum smoothness
     for (let py = 0; py < TILE_SIZE; py++) {
       for (let px = 0; px < TILE_SIZE; px++) {
         const gx = pixelToGridX(px);
         const gy = pixelToGridY(py);
 
-        let value = bilinearInterpolate(gridData, gx, gy);
+        // Use bicubic for ultra-smooth gradients, falls back to bilinear at edges
+        let value = bicubicInterpolate(gridData, gx, gy);
 
         if (value === null) {
           // Transparent pixel
@@ -405,19 +528,10 @@ export async function GET(
         let color = getColorForValue(value, colorScale);
         let alpha = 200; // Base opacity
 
-        // Check for contour
+        // Check for contour using pre-converted grid
         if (contourConfig) {
-          // Create a converted grid for contour detection (only convert once if needed)
-          // For simplicity, we'll use the raw grid for contour detection
-          // and check if this pixel is on a contour line
           const isContour = isContourPixel(
-            gridData.map(row => row.map(v => {
-              if (v === null) return null;
-              if (variable.includes('temperature') || variable.includes('dew_point') || variable.includes('apparent')) {
-                return celsiusToFahrenheit(v);
-              }
-              return v;
-            })),
+            convertedGrid,
             px, py, TILE_SIZE, gridWidth, gridHeight, contourConfig.interval
           );
 

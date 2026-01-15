@@ -119,7 +119,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoSupport: true,
     openMeteoModel: 'gfs_seamless',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe', 'pressure', 'clouds'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
   {
     id: 'ecmwf',
@@ -136,7 +136,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'ecmwf_ifs',
     openMeteoApiEndpoint: 'ecmwf',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'pressure', 'clouds'],
-    maxZoom: 7,
+    maxZoom: 5,
   },
   {
     id: 'ecmwf_aifs',
@@ -153,7 +153,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'ecmwf_aifs',
     openMeteoApiEndpoint: 'ecmwf',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'pressure'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
   {
     id: 'icon_global',
@@ -170,7 +170,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'icon_global',
     openMeteoApiEndpoint: 'dwd-icon',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe', 'pressure', 'clouds'],
-    maxZoom: 7,
+    maxZoom: 5,
   },
   {
     id: 'gdps',
@@ -187,7 +187,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'gem_global',
     openMeteoApiEndpoint: 'gem',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'pressure', 'clouds'],
-    maxZoom: 7,
+    maxZoom: 5,
   },
   {
     id: 'ukmo_global',
@@ -204,7 +204,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'ukmo_global_deterministic_10km',
     openMeteoApiEndpoint: 'ukmo',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'pressure', 'clouds'],
-    maxZoom: 8,
+    maxZoom: 5,
   },
   {
     id: 'cfs',
@@ -219,7 +219,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 6, 12, 18],
     openMeteoSupport: false, // Not available in Open-Meteo
     variables: ['temperature', 'precipitation'],
-    maxZoom: 5,
+    maxZoom: 4,
   },
   {
     id: 'gfs_graphcast',
@@ -234,7 +234,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 6, 12, 18],
     openMeteoSupport: false, // Not directly available
     variables: ['temperature', 'wind', 'precipitation'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
 
   // ==================== REGIONAL MODELS ====================
@@ -252,7 +252,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoSupport: true,
     openMeteoModel: 'gfs_seamless', // NAM data incorporated
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe', 'pressure', 'clouds'],
-    maxZoom: 8,
+    maxZoom: 6,
   },
   {
     id: 'rap',
@@ -267,7 +267,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: Array.from({ length: 24 }, (_, i) => i),
     openMeteoSupport: false, // Not directly in Open-Meteo
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe'],
-    maxZoom: 8,
+    maxZoom: 6,
   },
   {
     id: 'rdps',
@@ -284,7 +284,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'gem_regional',
     openMeteoApiEndpoint: 'gem',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'pressure', 'clouds'],
-    maxZoom: 8,
+    maxZoom: 7,
   },
   {
     id: 'icon_eu',
@@ -301,7 +301,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'icon_eu',
     openMeteoApiEndpoint: 'dwd-icon',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe', 'pressure', 'clouds'],
-    maxZoom: 9,
+    maxZoom: 7,
   },
 
   // ==================== CAM (Convection-Allowing Models) ====================
@@ -319,7 +319,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoSupport: true,
     openMeteoModel: 'gfs_hrrr',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe', 'pressure', 'clouds'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'nam_3km',
@@ -334,7 +334,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 6, 12, 18],
     openMeteoSupport: false, // Not in Open-Meteo
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'hrdps',
@@ -351,7 +351,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'gem_hrdps_continental',
     openMeteoApiEndpoint: 'gem',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'pressure', 'clouds'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'icon_d2',
@@ -368,7 +368,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'icon_d2',
     openMeteoApiEndpoint: 'dwd-icon',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe', 'pressure', 'clouds'],
-    maxZoom: 11,
+    maxZoom: 9,
   },
   {
     id: 'hrw_arw',
@@ -383,7 +383,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false,
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'hrw_nssl',
@@ -398,7 +398,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false,
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'hrw_fv3',
@@ -413,7 +413,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false,
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'rrfs_a',
@@ -428,7 +428,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: Array.from({ length: 24 }, (_, i) => i),
     openMeteoSupport: false,
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'gsl_mpas',
@@ -443,7 +443,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false,
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'nssl_mpas_htpo',
@@ -458,7 +458,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false,
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'nssl_mpas_rn',
@@ -473,7 +473,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false,
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
   {
     id: 'nssl_mpas_rn3',
@@ -488,7 +488,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false,
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
 
   // ==================== ENSEMBLE MODELS ====================
@@ -507,7 +507,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'gfs_seamless', // Ensemble data available
     openMeteoApiEndpoint: 'ensemble',
     variables: ['temperature', 'precipitation', 'wind'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
   {
     id: 'ecmwf_eps',
@@ -524,7 +524,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'ecmwf_ifs',
     openMeteoApiEndpoint: 'ensemble',
     variables: ['temperature', 'precipitation', 'wind'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
   {
     id: 'eps_opendata',
@@ -541,7 +541,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'ecmwf_ifs',
     openMeteoApiEndpoint: 'ensemble',
     variables: ['temperature', 'precipitation', 'wind'],
-    maxZoom: 5,
+    maxZoom: 4,
   },
   {
     id: 'eps_aifs',
@@ -556,7 +556,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 12],
     openMeteoSupport: false, // Not yet available
     variables: ['temperature', 'precipitation'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
   {
     id: 'icon_eps',
@@ -573,7 +573,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'icon_seamless',
     openMeteoApiEndpoint: 'ensemble',
     variables: ['temperature', 'precipitation', 'wind'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
   {
     id: 'cmce',
@@ -590,7 +590,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'gem_global',
     openMeteoApiEndpoint: 'ensemble',
     variables: ['temperature', 'precipitation', 'wind'],
-    maxZoom: 5,
+    maxZoom: 4,
   },
   {
     id: 'mogreps_g',
@@ -605,7 +605,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [0, 6, 12, 18],
     openMeteoSupport: false, // Not in Open-Meteo
     variables: ['temperature', 'precipitation', 'wind'],
-    maxZoom: 6,
+    maxZoom: 5,
   },
   {
     id: 'sref',
@@ -620,7 +620,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     runHours: [3, 9, 15, 21],
     openMeteoSupport: false, // Not in Open-Meteo
     variables: ['temperature', 'precipitation', 'severe'],
-    maxZoom: 8,
+    maxZoom: 6,
   },
   {
     id: 'nbm',
@@ -637,7 +637,7 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
     openMeteoModel: 'ncep_nbm_conus',
     openMeteoApiEndpoint: 'forecast',
     variables: ['temperature', 'moisture', 'wind', 'precipitation', 'clouds'],
-    maxZoom: 10,
+    maxZoom: 9,
   },
 ];
 
@@ -752,3 +752,76 @@ export const COLOR_SCALES = {
     ]
   },
 };
+
+// Regional high-res model coverage boundaries
+interface RegionBounds {
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
+}
+
+const REGIONAL_MODEL_COVERAGE: Record<string, RegionBounds> = {
+  // CONUS models
+  hrrr: { minLat: 21, maxLat: 53, minLon: -134, maxLon: -60 },
+  nbm: { minLat: 21, maxLat: 53, minLon: -134, maxLon: -60 },
+  // Canadian HRDPS - Continental domain
+  hrdps: { minLat: 35, maxLat: 70, minLon: -145, maxLon: -50 },
+  // ICON-D2 - Germany/Central Europe
+  icon_d2: { minLat: 43, maxLat: 58, minLon: 2, maxLon: 20 },
+  // ICON-EU - Europe
+  icon_eu: { minLat: 29, maxLat: 70, minLon: -23, maxLon: 45 },
+};
+
+/**
+ * Get the best high-resolution model for a given map center
+ * Used for auto-switching when user zooms past a coarse model's maxZoom
+ */
+export function getHighResModelForLocation(
+  centerLon: number,
+  centerLat: number,
+  currentVariable: string,
+  currentModelId: string
+): ModelDefinition | null {
+  // Priority order: HRRR (CONUS) > HRDPS (Canada) > ICON-D2 (Germany) > NBM (CONUS fallback)
+  const priorityModels = ['hrrr', 'hrdps', 'icon_d2', 'nbm', 'icon_eu'];
+
+  for (const modelId of priorityModels) {
+    // Don't switch to the same model
+    if (modelId === currentModelId) continue;
+
+    const model = getModelById(modelId);
+    if (!model || !model.openMeteoSupport) continue;
+
+    const bounds = REGIONAL_MODEL_COVERAGE[modelId];
+    if (!bounds) continue;
+
+    // Check if center is within model coverage
+    if (
+      centerLat >= bounds.minLat &&
+      centerLat <= bounds.maxLat &&
+      centerLon >= bounds.minLon &&
+      centerLon <= bounds.maxLon
+    ) {
+      // Check if model supports a similar variable group
+      const varGroup = getVariableGroup(currentVariable);
+      if (varGroup && model.variables.includes(varGroup)) {
+        return model;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Get the variable group for a specific variable ID
+ */
+function getVariableGroup(variableId: string): string | null {
+  for (const [groupId, group] of Object.entries(VARIABLE_GROUPS)) {
+    if (group.variables.some(v => v.id === variableId)) {
+      return groupId;
+    }
+  }
+  return null;
+}

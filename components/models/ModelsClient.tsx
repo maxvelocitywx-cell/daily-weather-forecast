@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { Play, Pause, ChevronDown, ChevronRight, Maximize2, Info, AlertCircle } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, ChevronDown, ChevronRight, Info, AlertCircle } from 'lucide-react';
 import {
   MODEL_REGISTRY,
   VARIABLE_GROUPS,
   getModelById,
   getModelRuns,
   getModelsByCategory,
+  getHighResModelForLocation,
   type ModelDefinition,
   type ModelCategory,
 } from '@/lib/models/registry';
@@ -66,9 +67,14 @@ export default function ModelsClient() {
 
   // Model selection state
   const [selectedModel, setSelectedModel] = useState<ModelDefinition>(MODEL_REGISTRY.find(m => m.id === 'gfs')!);
+  const [userSelectedModel, setUserSelectedModel] = useState<ModelDefinition>(MODEL_REGISTRY.find(m => m.id === 'gfs')!);
   const [selectedRun, setSelectedRun] = useState<{ runHour: number; timestamp: Date; label: string } | null>(null);
   const [selectedVariable, setSelectedVariable] = useState('temperature_2m');
   const [forecastHour, setForecastHour] = useState(0);
+
+  // Auto-switch notice state
+  const [autoSwitchNotice, setAutoSwitchNotice] = useState<string | null>(null);
+  const autoSwitchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Animation state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -151,6 +157,9 @@ export default function ModelsClient() {
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
       }
+      if (autoSwitchTimeoutRef.current) {
+        clearTimeout(autoSwitchTimeoutRef.current);
+      }
       map.current?.remove();
       map.current = null;
     };
@@ -164,6 +173,59 @@ export default function ModelsClient() {
     const firstSymbol = style.layers.find(l => l.type === 'symbol');
     return firstSymbol?.id;
   }, []);
+
+  // Handle zoom changes for auto-switching models
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+
+    const m = map.current;
+
+    const handleZoomEnd = () => {
+      const currentZoom = m.getZoom();
+      const center = m.getCenter();
+      const modelMaxZoom = userSelectedModel.maxZoom;
+
+      // If zoomed past the user's selected model's maxZoom
+      if (currentZoom > modelMaxZoom) {
+        // Find a high-res model for this location
+        const highResModel = getHighResModelForLocation(
+          center.lng,
+          center.lat,
+          selectedVariable,
+          userSelectedModel.id
+        );
+
+        if (highResModel && highResModel.id !== selectedModel.id) {
+          // Auto-switch to the high-res model
+          setSelectedModel(highResModel);
+
+          // Show notice
+          setAutoSwitchNotice(`Auto-switched to ${highResModel.shortName} for higher resolution`);
+
+          // Clear notice after 4 seconds
+          if (autoSwitchTimeoutRef.current) {
+            clearTimeout(autoSwitchTimeoutRef.current);
+          }
+          autoSwitchTimeoutRef.current = setTimeout(() => {
+            setAutoSwitchNotice(null);
+          }, 4000);
+        }
+      } else if (currentZoom <= modelMaxZoom && selectedModel.id !== userSelectedModel.id) {
+        // Zoomed back out, switch back to user's selected model
+        setSelectedModel(userSelectedModel);
+        setAutoSwitchNotice(null);
+        if (autoSwitchTimeoutRef.current) {
+          clearTimeout(autoSwitchTimeoutRef.current);
+        }
+      }
+    };
+
+    m.on('zoomend', handleZoomEnd);
+
+    return () => {
+      m.off('zoomend', handleZoomEnd);
+    };
+  }, [mapLoaded, userSelectedModel, selectedModel, selectedVariable]);
 
   // Update source tiles helper (defined before effects that use it)
   const updateSourceTiles = useCallback((sourceId: string, newUrl: string) => {
@@ -489,86 +551,138 @@ export default function ModelsClient() {
     });
   };
 
+  // Handle user model selection (clears auto-switch state)
+  const handleModelSelect = useCallback((model: ModelDefinition) => {
+    setUserSelectedModel(model);
+    setSelectedModel(model);
+    setAutoSwitchNotice(null);
+    if (autoSwitchTimeoutRef.current) {
+      clearTimeout(autoSwitchTimeoutRef.current);
+    }
+  }, []);
+
   // Get available runs
   const availableRuns = useMemo(() => {
     return getModelRuns(selectedModel, 4);
   }, [selectedModel]);
 
+  // Step forward/backward by one frame
+  const stepFrame = useCallback((direction: 'forward' | 'backward') => {
+    const currentIndex = forecastHours.indexOf(forecastHour);
+    let newIndex: number;
+    if (direction === 'forward') {
+      newIndex = (currentIndex + 1) % forecastHours.length;
+    } else {
+      newIndex = currentIndex - 1;
+      if (newIndex < 0) newIndex = forecastHours.length - 1;
+    }
+    const newHour = forecastHours[newIndex];
+
+    if (!map.current || !layersReady) return;
+
+    const url = buildTileUrl(newHour);
+    updateSourceTiles('model-source-A', url);
+
+    if (map.current.getLayer('model-layer-A')) {
+      map.current.setPaintProperty('model-layer-A', 'raster-opacity', MODEL_OPACITY);
+    }
+    if (map.current.getLayer('model-layer-B')) {
+      map.current.setPaintProperty('model-layer-B', 'raster-opacity', 0);
+    }
+
+    bufferStateRef.current = {
+      activeBuffer: 'A',
+      bufferAHour: newHour,
+      bufferBHour: newHour,
+      isTransitioning: false,
+    };
+
+    setForecastHour(newHour);
+  }, [forecastHour, forecastHours, layersReady, buildTileUrl, updateSourceTiles]);
+
   return (
-    <div className="min-h-screen bg-mv-bg-primary flex flex-col">
+    <div className="h-screen bg-mv-bg-primary flex flex-col overflow-hidden">
       {/* Top bar */}
-      <header className="bg-mv-bg-secondary/95 backdrop-blur-sm border-b border-white/10 px-4 py-3 z-20">
+      <header className="flex-shrink-0 bg-mv-bg-secondary/95 backdrop-blur-sm border-b border-white/10 px-4 py-2 z-20">
         <div className="max-w-[1920px] mx-auto flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <h1 className="text-xl font-bold bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent">
+            <h1 className="text-lg font-bold bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent">
               Computer Models
             </h1>
             <div className="hidden sm:flex items-center gap-2 text-sm">
-              <span className="px-2 py-1 rounded bg-cyan-500/20 text-cyan-400 font-mono">
+              <span className={`px-2 py-0.5 rounded font-mono text-xs ${
+                selectedModel.id !== userSelectedModel.id
+                  ? 'bg-amber-500/20 text-amber-400'
+                  : 'bg-cyan-500/20 text-cyan-400'
+              }`}>
                 {selectedModel.shortName}
+                {selectedModel.id !== userSelectedModel.id && (
+                  <span className="ml-1 opacity-70">(auto)</span>
+                )}
               </span>
               <span className="text-mv-text-muted">•</span>
-              <span className="text-mv-text-secondary">
+              <span className="text-mv-text-secondary text-xs">
                 {selectedRun?.label || '--Z'} Run
-              </span>
-              <span className="text-mv-text-muted">•</span>
-              <span className="text-mv-text-secondary">
-                F{forecastHour.toString().padStart(3, '0')}
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-3 text-sm">
-            <div className="hidden md:block text-mv-text-muted">Valid:</div>
-            <div className="text-mv-text-primary font-mono">{validTime || '--'}</div>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-mv-text-muted text-xs hidden md:inline">Valid:</span>
+            <span className="text-mv-text-primary font-mono text-xs">{validTime || '--'}</span>
           </div>
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      {/* Main content area - sidebar + map */}
+      <div className="flex-1 flex overflow-hidden min-h-0">
         {/* Left sidebar */}
         <aside
-          className={`${sidebarCollapsed ? 'w-12' : 'w-72'} bg-mv-bg-secondary/95 backdrop-blur-sm border-r border-white/10 flex flex-col transition-all duration-300 overflow-hidden z-10`}
+          className={`flex-shrink-0 ${sidebarCollapsed ? 'w-10' : 'w-64'} bg-mv-bg-secondary/95 backdrop-blur-sm border-r border-white/10 flex flex-col transition-all duration-300 overflow-hidden z-10`}
         >
           {/* Collapse toggle */}
           <button
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            className="w-full py-2 px-3 flex items-center justify-center border-b border-white/10 hover:bg-white/5 transition-colors"
+            onClick={() => {
+              setSidebarCollapsed(!sidebarCollapsed);
+              // Trigger map resize after sidebar animation
+              setTimeout(() => map.current?.resize(), 350);
+            }}
+            className="flex-shrink-0 w-full py-2 px-2 flex items-center justify-center border-b border-white/10 hover:bg-white/5 transition-colors"
           >
             <ChevronRight
-              size={16}
+              size={14}
               className={`text-mv-text-muted transition-transform ${sidebarCollapsed ? '' : 'rotate-180'}`}
             />
           </button>
 
           {!sidebarCollapsed && (
-            <div className="flex-1 overflow-y-auto p-3 space-y-4">
+            <div className="flex-1 overflow-y-auto p-2 space-y-3 text-xs">
               {/* Model Selection */}
               <section>
-                <h3 className="text-xs font-semibold text-mv-text-muted uppercase tracking-wider mb-2">
+                <h3 className="text-[10px] font-semibold text-mv-text-muted uppercase tracking-wider mb-1.5">
                   Model
                 </h3>
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {(['global', 'regional', 'cam', 'ensemble'] as ModelCategory[]).map(category => (
-                    <div key={category} className="rounded-lg border border-white/10 overflow-hidden">
+                    <div key={category} className="rounded border border-white/10 overflow-hidden">
                       <button
                         onClick={() => toggleCategory(category)}
-                        className="w-full px-3 py-2 flex items-center justify-between bg-white/5 hover:bg-white/10 transition-colors"
+                        className="w-full px-2 py-1.5 flex items-center justify-between bg-white/5 hover:bg-white/10 transition-colors"
                       >
-                        <span className="text-sm text-mv-text-primary">{CATEGORY_INFO[category].name}</span>
+                        <span className="text-xs text-mv-text-primary">{CATEGORY_INFO[category].name}</span>
                         <ChevronDown
-                          size={14}
+                          size={12}
                           className={`text-mv-text-muted transition-transform ${expandedCategories.has(category) ? 'rotate-180' : ''}`}
                         />
                       </button>
                       {expandedCategories.has(category) && (
-                        <div className="p-1 space-y-0.5">
+                        <div className="p-0.5 space-y-0.5">
                           {getModelsByCategory(category).map(model => (
                             <button
                               key={model.id}
-                              onClick={() => setSelectedModel(model)}
+                              onClick={() => handleModelSelect(model)}
                               disabled={!model.openMeteoSupport}
-                              className={`w-full px-2 py-1.5 rounded text-left text-xs flex items-center justify-between transition-colors ${
-                                selectedModel.id === model.id
+                              className={`w-full px-1.5 py-1 rounded text-left text-[11px] flex items-center justify-between transition-colors ${
+                                userSelectedModel.id === model.id
                                   ? 'bg-cyan-500/20 text-cyan-400'
                                   : model.openMeteoSupport
                                     ? 'hover:bg-white/5 text-mv-text-secondary'
@@ -578,7 +692,7 @@ export default function ModelsClient() {
                             >
                               <span>{model.shortName}</span>
                               {!model.openMeteoSupport && (
-                                <AlertCircle size={12} className="text-amber-500/70" />
+                                <AlertCircle size={10} className="text-amber-500/70" />
                               )}
                             </button>
                           ))}
@@ -591,15 +705,15 @@ export default function ModelsClient() {
 
               {/* Run Selection */}
               <section>
-                <h3 className="text-xs font-semibold text-mv-text-muted uppercase tracking-wider mb-2">
+                <h3 className="text-[10px] font-semibold text-mv-text-muted uppercase tracking-wider mb-1.5">
                   Run
                 </h3>
-                <div className="flex gap-1">
+                <div className="flex gap-0.5">
                   {availableRuns.map((run, idx) => (
                     <button
                       key={idx}
                       onClick={() => setSelectedRun(run)}
-                      className={`flex-1 px-2 py-1.5 rounded text-xs font-mono transition-colors ${
+                      className={`flex-1 px-1.5 py-1 rounded text-[10px] font-mono transition-colors ${
                         selectedRun?.label === run.label
                           ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
                           : 'bg-white/5 text-mv-text-secondary hover:bg-white/10 border border-transparent'
@@ -613,38 +727,38 @@ export default function ModelsClient() {
 
               {/* Variable Selection */}
               <section>
-                <h3 className="text-xs font-semibold text-mv-text-muted uppercase tracking-wider mb-2">
+                <h3 className="text-[10px] font-semibold text-mv-text-muted uppercase tracking-wider mb-1.5">
                   Variable
                 </h3>
-                <div className="space-y-1">
+                <div className="space-y-0.5">
                   {Object.entries(VARIABLE_GROUPS).map(([groupId, group]) => {
                     const isModelSupported = selectedModel.variables.includes(groupId);
                     return (
                       <div
                         key={groupId}
-                        className={`rounded-lg border border-white/10 overflow-hidden ${!isModelSupported ? 'opacity-50' : ''}`}
+                        className={`rounded border border-white/10 overflow-hidden ${!isModelSupported ? 'opacity-50' : ''}`}
                       >
                         <button
                           onClick={() => isModelSupported && toggleVarGroup(groupId)}
                           disabled={!isModelSupported}
-                          className="w-full px-3 py-1.5 flex items-center justify-between bg-white/5 hover:bg-white/10 transition-colors"
+                          className="w-full px-2 py-1 flex items-center justify-between bg-white/5 hover:bg-white/10 transition-colors"
                         >
-                          <span className="text-sm text-mv-text-primary flex items-center gap-2">
-                            <span>{group.icon}</span>
+                          <span className="text-xs text-mv-text-primary flex items-center gap-1.5">
+                            <span className="text-sm">{group.icon}</span>
                             {group.name}
                           </span>
                           <ChevronDown
-                            size={14}
+                            size={12}
                             className={`text-mv-text-muted transition-transform ${expandedVarGroups.has(groupId) ? 'rotate-180' : ''}`}
                           />
                         </button>
                         {expandedVarGroups.has(groupId) && isModelSupported && (
-                          <div className="p-1 space-y-0.5">
+                          <div className="p-0.5 space-y-0.5">
                             {group.variables.map(variable => (
                               <button
                                 key={variable.id}
                                 onClick={() => setSelectedVariable(variable.id)}
-                                className={`w-full px-2 py-1 rounded text-left text-xs transition-colors ${
+                                className={`w-full px-1.5 py-0.5 rounded text-left text-[11px] transition-colors ${
                                   selectedVariable === variable.id
                                     ? 'bg-cyan-500/20 text-cyan-400'
                                     : 'hover:bg-white/5 text-mv-text-secondary'
@@ -663,15 +777,15 @@ export default function ModelsClient() {
 
               {/* Region Presets */}
               <section>
-                <h3 className="text-xs font-semibold text-mv-text-muted uppercase tracking-wider mb-2">
+                <h3 className="text-[10px] font-semibold text-mv-text-muted uppercase tracking-wider mb-1.5">
                   Region
                 </h3>
-                <div className="grid grid-cols-2 gap-1">
+                <div className="grid grid-cols-2 gap-0.5">
                   {REGION_PRESETS.map(region => (
                     <button
                       key={region.name}
                       onClick={() => navigateToRegion(region)}
-                      className="px-2 py-1.5 rounded text-xs bg-white/5 text-mv-text-secondary hover:bg-white/10 transition-colors"
+                      className="px-1.5 py-1 rounded text-[10px] bg-white/5 text-mv-text-secondary hover:bg-white/10 transition-colors"
                     >
                       {region.name}
                     </button>
@@ -680,18 +794,14 @@ export default function ModelsClient() {
               </section>
 
               {/* Model Info */}
-              <section className="p-3 rounded-lg bg-white/5 border border-white/10">
-                <div className="flex items-center gap-2 mb-2">
-                  <Info size={14} className="text-cyan-400" />
-                  <span className="text-xs font-semibold text-mv-text-primary">{selectedModel.name}</span>
+              <section className="p-2 rounded bg-white/5 border border-white/10">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Info size={12} className="text-cyan-400" />
+                  <span className="text-[11px] font-semibold text-mv-text-primary">{selectedModel.name}</span>
                 </div>
-                <div className="text-xs text-mv-text-muted space-y-1">
-                  <p>{selectedModel.description}</p>
+                <div className="text-[10px] text-mv-text-muted space-y-0.5">
                   <p className="text-mv-text-secondary">
-                    Resolution: {selectedModel.resolution}
-                  </p>
-                  <p className="text-mv-text-secondary">
-                    Forecast: {selectedModel.forecastHours}h
+                    {selectedModel.resolution} • {selectedModel.forecastHours}h
                   </p>
                 </div>
               </section>
@@ -699,67 +809,109 @@ export default function ModelsClient() {
           )}
         </aside>
 
-        {/* Map container */}
-        <main className="flex-1 relative">
-          <div ref={mapContainer} className="absolute inset-0" />
+        {/* Map + Controls area */}
+        <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          {/* Map with responsive viewport height: mobile 50vh, tablet 60vh, desktop 65vh */}
+          <div className="relative flex-shrink-0 h-[50vh] md:h-[60vh] lg:h-[65vh] max-h-[800px] min-h-[280px]">
+            <div ref={mapContainer} className="absolute inset-0" />
 
-          {/* Forecast hour controls - bottom */}
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-mv-bg-secondary/95 backdrop-blur-sm rounded-lg border border-white/10 p-3 z-10" style={{ width: '400px', maxWidth: '90%' }}>
-            {/* Play/Pause and hour display */}
-            <div className="flex items-center gap-3 mb-2">
-              <button
-                onClick={() => setIsPlaying(!isPlaying)}
-                className="p-2 rounded-full bg-cyan-500/20 hover:bg-cyan-500/30 transition-colors"
-              >
-                {isPlaying ? (
-                  <Pause size={16} className="text-cyan-400" />
-                ) : (
-                  <Play size={16} className="text-cyan-400 ml-0.5" />
-                )}
-              </button>
-              <div className="flex-1">
-                <input
-                  type="range"
-                  min={0}
-                  max={maxForecastHour}
-                  step={selectedModel.category === 'cam' ? 1 : 3}
-                  value={forecastHour}
-                  onChange={handleSliderChange}
-                  className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer
-                    [&::-webkit-slider-thumb]:appearance-none
-                    [&::-webkit-slider-thumb]:w-3
-                    [&::-webkit-slider-thumb]:h-3
-                    [&::-webkit-slider-thumb]:rounded-full
-                    [&::-webkit-slider-thumb]:bg-cyan-400
-                    [&::-webkit-slider-thumb]:cursor-pointer
-                    [&::-moz-range-thumb]:w-3
-                    [&::-moz-range-thumb]:h-3
-                    [&::-moz-range-thumb]:rounded-full
-                    [&::-moz-range-thumb]:bg-cyan-400
-                    [&::-moz-range-thumb]:border-0"
-                />
+            {/* Auto-switch notice */}
+            {autoSwitchNotice && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 animate-fade-in">
+                <div className="bg-amber-500/90 backdrop-blur-sm text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-sm font-medium">
+                  <Info size={16} />
+                  {autoSwitchNotice}
+                </div>
               </div>
-              <div className="text-sm font-mono text-cyan-400 w-14 text-right">
-                F{forecastHour.toString().padStart(3, '0')}
+            )}
+
+            {/* Loading overlay */}
+            {!mapLoaded && (
+              <div className="absolute inset-0 flex items-center justify-center bg-mv-bg-primary z-20">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="w-10 h-10 rounded-full border-2 border-cyan-500/30 border-t-cyan-500 animate-spin" />
+                  <span className="text-sm text-mv-text-muted">Loading map...</span>
+                </div>
               </div>
-            </div>
-            {/* Time labels */}
-            <div className="flex justify-between text-xs text-mv-text-muted">
-              <span>Init</span>
-              <span className="text-mv-text-secondary">{validTime}</span>
-              <span>F{maxForecastHour}</span>
-            </div>
+            )}
           </div>
 
-          {/* Loading overlay */}
-          {!mapLoaded && (
-            <div className="absolute inset-0 flex items-center justify-center bg-mv-bg-primary z-20">
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-10 h-10 rounded-full border-2 border-cyan-500/30 border-t-cyan-500 animate-spin" />
-                <span className="text-sm text-mv-text-muted">Loading map...</span>
+          {/* Bottom controls bar - OUTSIDE map, sticky, always visible */}
+          <div className="flex-shrink-0 sticky bottom-0 bg-mv-bg-secondary/95 backdrop-blur-sm border-t border-white/10 px-4 py-3 z-20">
+            <div className="max-w-2xl mx-auto">
+              {/* Control row: Step back, Play/Pause, Slider, Step forward, Hour display */}
+              <div className="flex items-center gap-3">
+                {/* Step backward */}
+                <button
+                  onClick={() => stepFrame('backward')}
+                  className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                  title="Step backward"
+                >
+                  <SkipBack size={16} className="text-mv-text-secondary" />
+                </button>
+
+                {/* Play/Pause */}
+                <button
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  className="p-2 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 transition-colors"
+                  title={isPlaying ? 'Pause' : 'Play'}
+                >
+                  {isPlaying ? (
+                    <Pause size={18} className="text-cyan-400" />
+                  ) : (
+                    <Play size={18} className="text-cyan-400 ml-0.5" />
+                  )}
+                </button>
+
+                {/* Step forward */}
+                <button
+                  onClick={() => stepFrame('forward')}
+                  className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                  title="Step forward"
+                >
+                  <SkipForward size={16} className="text-mv-text-secondary" />
+                </button>
+
+                {/* Slider */}
+                <div className="flex-1 px-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={maxForecastHour}
+                    step={selectedModel.category === 'cam' ? 1 : 3}
+                    value={forecastHour}
+                    onChange={handleSliderChange}
+                    className="w-full h-2 bg-white/10 rounded-full appearance-none cursor-pointer
+                      [&::-webkit-slider-thumb]:appearance-none
+                      [&::-webkit-slider-thumb]:w-4
+                      [&::-webkit-slider-thumb]:h-4
+                      [&::-webkit-slider-thumb]:rounded-full
+                      [&::-webkit-slider-thumb]:bg-cyan-400
+                      [&::-webkit-slider-thumb]:cursor-pointer
+                      [&::-webkit-slider-thumb]:shadow-lg
+                      [&::-moz-range-thumb]:w-4
+                      [&::-moz-range-thumb]:h-4
+                      [&::-moz-range-thumb]:rounded-full
+                      [&::-moz-range-thumb]:bg-cyan-400
+                      [&::-moz-range-thumb]:border-0
+                      [&::-moz-range-thumb]:shadow-lg"
+                  />
+                </div>
+
+                {/* Hour display */}
+                <div className="text-sm font-mono text-cyan-400 w-16 text-right font-semibold">
+                  F{forecastHour.toString().padStart(3, '0')}
+                </div>
+              </div>
+
+              {/* Time labels row */}
+              <div className="flex justify-between text-xs text-mv-text-muted mt-2 px-1">
+                <span>Init ({selectedRun?.label || '--Z'})</span>
+                <span className="text-mv-text-secondary font-medium">{validTime}</span>
+                <span>F{maxForecastHour}</span>
               </div>
             </div>
-          )}
+          </div>
         </main>
       </div>
     </div>
