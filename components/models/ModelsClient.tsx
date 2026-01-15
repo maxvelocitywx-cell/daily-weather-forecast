@@ -7,10 +7,8 @@ import { Play, Pause, SkipBack, SkipForward, ChevronDown, ChevronRight, Info, Al
 import {
   MODEL_REGISTRY,
   VARIABLE_GROUPS,
-  getModelById,
   getModelRuns,
   getModelsByCategory,
-  getHighResModelForLocation,
   type ModelDefinition,
   type ModelCategory,
 } from '@/lib/models/registry';
@@ -65,16 +63,11 @@ export default function ModelsClient() {
   const [mapLoaded, setMapLoaded] = useState(false);
   const [layersReady, setLayersReady] = useState(false);
 
-  // Model selection state
+  // Model selection state - model stays fixed at user selection, no auto-switching
   const [selectedModel, setSelectedModel] = useState<ModelDefinition>(MODEL_REGISTRY.find(m => m.id === 'gfs')!);
-  const [userSelectedModel, setUserSelectedModel] = useState<ModelDefinition>(MODEL_REGISTRY.find(m => m.id === 'gfs')!);
   const [selectedRun, setSelectedRun] = useState<{ runHour: number; timestamp: Date; label: string } | null>(null);
   const [selectedVariable, setSelectedVariable] = useState('temperature_2m');
   const [forecastHour, setForecastHour] = useState(0);
-
-  // Auto-switch notice state
-  const [autoSwitchNotice, setAutoSwitchNotice] = useState<string | null>(null);
-  const autoSwitchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Animation state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -157,9 +150,6 @@ export default function ModelsClient() {
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
       }
-      if (autoSwitchTimeoutRef.current) {
-        clearTimeout(autoSwitchTimeoutRef.current);
-      }
       map.current?.remove();
       map.current = null;
     };
@@ -173,59 +163,6 @@ export default function ModelsClient() {
     const firstSymbol = style.layers.find(l => l.type === 'symbol');
     return firstSymbol?.id;
   }, []);
-
-  // Handle zoom changes for auto-switching models
-  useEffect(() => {
-    if (!mapLoaded || !map.current) return;
-
-    const m = map.current;
-
-    const handleZoomEnd = () => {
-      const currentZoom = m.getZoom();
-      const center = m.getCenter();
-      const modelMaxZoom = userSelectedModel.maxZoom;
-
-      // If zoomed past the user's selected model's maxZoom
-      if (currentZoom > modelMaxZoom) {
-        // Find a high-res model for this location
-        const highResModel = getHighResModelForLocation(
-          center.lng,
-          center.lat,
-          selectedVariable,
-          userSelectedModel.id
-        );
-
-        if (highResModel && highResModel.id !== selectedModel.id) {
-          // Auto-switch to the high-res model
-          setSelectedModel(highResModel);
-
-          // Show notice
-          setAutoSwitchNotice(`Auto-switched to ${highResModel.shortName} for higher resolution`);
-
-          // Clear notice after 4 seconds
-          if (autoSwitchTimeoutRef.current) {
-            clearTimeout(autoSwitchTimeoutRef.current);
-          }
-          autoSwitchTimeoutRef.current = setTimeout(() => {
-            setAutoSwitchNotice(null);
-          }, 4000);
-        }
-      } else if (currentZoom <= modelMaxZoom && selectedModel.id !== userSelectedModel.id) {
-        // Zoomed back out, switch back to user's selected model
-        setSelectedModel(userSelectedModel);
-        setAutoSwitchNotice(null);
-        if (autoSwitchTimeoutRef.current) {
-          clearTimeout(autoSwitchTimeoutRef.current);
-        }
-      }
-    };
-
-    m.on('zoomend', handleZoomEnd);
-
-    return () => {
-      m.off('zoomend', handleZoomEnd);
-    };
-  }, [mapLoaded, userSelectedModel, selectedModel, selectedVariable]);
 
   // Update source tiles helper (defined before effects that use it)
   const updateSourceTiles = useCallback((sourceId: string, newUrl: string) => {
@@ -551,14 +488,9 @@ export default function ModelsClient() {
     });
   };
 
-  // Handle user model selection (clears auto-switch state)
+  // Handle user model selection
   const handleModelSelect = useCallback((model: ModelDefinition) => {
-    setUserSelectedModel(model);
     setSelectedModel(model);
-    setAutoSwitchNotice(null);
-    if (autoSwitchTimeoutRef.current) {
-      clearTimeout(autoSwitchTimeoutRef.current);
-    }
   }, []);
 
   // Get available runs
@@ -610,15 +542,8 @@ export default function ModelsClient() {
               Computer Models
             </h1>
             <div className="hidden sm:flex items-center gap-2 text-sm">
-              <span className={`px-2 py-0.5 rounded font-mono text-xs ${
-                selectedModel.id !== userSelectedModel.id
-                  ? 'bg-amber-500/20 text-amber-400'
-                  : 'bg-cyan-500/20 text-cyan-400'
-              }`}>
+              <span className="px-2 py-0.5 rounded font-mono text-xs bg-cyan-500/20 text-cyan-400">
                 {selectedModel.shortName}
-                {selectedModel.id !== userSelectedModel.id && (
-                  <span className="ml-1 opacity-70">(auto)</span>
-                )}
               </span>
               <span className="text-mv-text-muted">•</span>
               <span className="text-mv-text-secondary text-xs">
@@ -682,7 +607,7 @@ export default function ModelsClient() {
                               onClick={() => handleModelSelect(model)}
                               disabled={!model.openMeteoSupport}
                               className={`w-full px-1.5 py-1 rounded text-left text-[11px] flex items-center justify-between transition-colors ${
-                                userSelectedModel.id === model.id
+                                selectedModel.id === model.id
                                   ? 'bg-cyan-500/20 text-cyan-400'
                                   : model.openMeteoSupport
                                     ? 'hover:bg-white/5 text-mv-text-secondary'
@@ -811,19 +736,9 @@ export default function ModelsClient() {
 
         {/* Map + Controls area */}
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Map with responsive viewport height: mobile 50vh, tablet 60vh, desktop 65vh */}
-          <div className="relative flex-shrink-0 h-[50vh] md:h-[60vh] lg:h-[65vh] max-h-[800px] min-h-[280px]">
+          {/* Map with larger height: mobile 60vh, tablet 65vh, desktop min(75vh, 1000px) */}
+          <div className="relative flex-shrink-0 h-[60vh] md:h-[65vh] lg:h-[75vh] max-h-[1000px] min-h-[320px]">
             <div ref={mapContainer} className="absolute inset-0" />
-
-            {/* Auto-switch notice */}
-            {autoSwitchNotice && (
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 animate-fade-in">
-                <div className="bg-amber-500/90 backdrop-blur-sm text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-sm font-medium">
-                  <Info size={16} />
-                  {autoSwitchNotice}
-                </div>
-              </div>
-            )}
 
             {/* Loading overlay */}
             {!mapLoaded && (
@@ -836,8 +751,8 @@ export default function ModelsClient() {
             )}
           </div>
 
-          {/* Bottom controls bar - OUTSIDE map, sticky, always visible */}
-          <div className="flex-shrink-0 sticky bottom-0 bg-mv-bg-secondary/95 backdrop-blur-sm border-t border-white/10 px-4 py-3 z-20">
+          {/* Timeline controls - directly under map, not sticky */}
+          <div className="flex-shrink-0 mt-2.5 mx-3 px-4 py-2.5 rounded-xl bg-[rgba(10,10,15,0.75)] backdrop-blur-[10px] border border-white/10">
             <div className="max-w-2xl mx-auto">
               {/* Control row: Step back, Play/Pause, Slider, Step forward, Hour display */}
               <div className="flex items-center gap-3">
