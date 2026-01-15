@@ -13,18 +13,27 @@ const WSSI_LAYER_IDS: Record<number, number> = {
 
 const MAPSERVER_BASE = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/wpc_wssi/MapServer';
 
-// Map WSSI categories to custom risk labels
-const WSSI_TO_RISK_MAP: Record<string, string> = {
+// WSSI categories in severity order (low to high)
+type WSSICategory = 'elevated' | 'minor' | 'moderate' | 'major' | 'extreme';
+
+const CATEGORY_ORDER: WSSICategory[] = ['elevated', 'minor', 'moderate', 'major', 'extreme'];
+
+// Map WSSI categories to display labels
+const WSSI_CATEGORY_LABELS: Record<WSSICategory, string> = {
+  'elevated': 'Winter Weather Area',
+  'minor': 'Minor Impacts',
+  'moderate': 'Moderate Impacts',
+  'major': 'Major Impacts',
+  'extreme': 'Extreme Impacts',
+};
+
+// Map to risk labels
+const WSSI_TO_RISK: Record<WSSICategory, string> = {
   'elevated': 'Marginal Risk',
-  'winter weather area': 'Marginal Risk',
   'minor': 'Slight Risk',
-  'minor impacts': 'Slight Risk',
   'moderate': 'Enhanced Risk',
-  'moderate impacts': 'Enhanced Risk',
   'major': 'Moderate Risk',
-  'major impacts': 'Moderate Risk',
   'extreme': 'High Risk',
-  'extreme impacts': 'High Risk',
 };
 
 // Risk colors
@@ -36,7 +45,7 @@ const RISK_COLORS: Record<string, string> = {
   'High Risk': '#DC2626',
 };
 
-// Risk order for sorting (lowest to highest)
+// Risk order for sorting
 const RISK_ORDER: Record<string, number> = {
   'Marginal Risk': 1,
   'Slight Risk': 2,
@@ -45,12 +54,52 @@ const RISK_ORDER: Record<string, number> = {
   'High Risk': 5,
 };
 
-// Cache for processed GeoJSON
-const wssiCache = new Map<string, { data: GeoJSON.FeatureCollection; timestamp: number; lastModified: string }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+// Cache
+const wssiCache = new Map<string, { data: GeoJSON.FeatureCollection; timestamp: number; lastModified: string; debug: DebugInfo }>();
+const CACHE_TTL = 5 * 60 * 1000;
+
+interface DebugInfo {
+  rawCounts: Record<string, number>;
+  bandedCounts: Record<string, number>;
+  unknownFeatures: number;
+  totalFeatures: number;
+}
 
 /**
- * Chaikin smoothing algorithm - smooths polygon edges
+ * Extract WSSI category from feature properties
+ * Returns null if category cannot be determined (feature will be omitted)
+ */
+function extractCategory(properties: Record<string, unknown>): WSSICategory | null {
+  // ArcGIS MapServer uses 'impact' field for the category
+  const possibleProps = ['impact', 'idp_wssilabel', 'label', 'Label', 'LABEL', 'name', 'Name'];
+
+  for (const prop of possibleProps) {
+    if (properties[prop]) {
+      const value = String(properties[prop]).toLowerCase().trim();
+
+      // Check for exact matches first
+      if (value === 'extreme' || value === 'extreme impacts') return 'extreme';
+      if (value === 'major' || value === 'major impacts') return 'major';
+      if (value === 'moderate' || value === 'moderate impacts') return 'moderate';
+      if (value === 'minor' || value === 'minor impacts') return 'minor';
+      if (value === 'elevated' || value === 'winter weather area') return 'elevated';
+
+      // Check for partial matches
+      if (value.includes('extreme')) return 'extreme';
+      if (value.includes('major')) return 'major';
+      if (value.includes('moderate')) return 'moderate';
+      if (value.includes('minor')) return 'minor';
+      if (value.includes('elevated') || value.includes('winter weather')) return 'elevated';
+    }
+  }
+
+  // Log unknown and return null - DO NOT default to elevated
+  console.warn('Unknown WSSI category for properties:', JSON.stringify(properties));
+  return null;
+}
+
+/**
+ * Chaikin smoothing algorithm
  */
 function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
   if (coords.length < 3) return coords;
@@ -64,13 +113,11 @@ function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
       const p0 = result[i];
       const p1 = result[i + 1];
 
-      // Q = 0.75 * P0 + 0.25 * P1
       const q = [
         0.75 * p0[0] + 0.25 * p1[0],
         0.75 * p0[1] + 0.25 * p1[1],
       ];
 
-      // R = 0.25 * P0 + 0.75 * P1
       const r = [
         0.25 * p0[0] + 0.75 * p1[0],
         0.25 * p0[1] + 0.75 * p1[1],
@@ -79,7 +126,6 @@ function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
       smoothed.push(q, r);
     }
 
-    // Close the polygon
     if (smoothed.length > 0) {
       smoothed.push(smoothed[0]);
     }
@@ -91,11 +137,10 @@ function chaikinSmooth(coords: number[][], iterations: number = 2): number[][] {
 }
 
 /**
- * Apply smoothing to a polygon's coordinates
- * Using 4 iterations for very smooth curves
+ * Apply smoothing to polygon coordinates
  */
 function smoothPolygonCoords(rings: number[][][]): number[][][] {
-  return rings.map(ring => chaikinSmooth(ring, 4));
+  return rings.map(ring => chaikinSmooth(ring, 2));
 }
 
 /**
@@ -119,44 +164,62 @@ function smoothGeometry(geometry: GeoJSON.Geometry): GeoJSON.Geometry {
 }
 
 /**
- * Extract WSSI impact level from feature properties
+ * Union all features in an array into a single MultiPolygon
  */
-function extractImpactLevel(properties: Record<string, unknown>): string {
-  // ArcGIS returns 'label' or 'Label' with the impact level
-  const possibleProps = ['label', 'Label', 'LABEL', 'name', 'Name', 'idp_wssilabel'];
+function unionFeatures(features: GeoJSON.Feature[]): GeoJSON.Feature | null {
+  if (features.length === 0) return null;
+  if (features.length === 1) return features[0];
 
-  for (const prop of possibleProps) {
-    if (properties[prop]) {
-      const value = String(properties[prop]).toLowerCase().trim();
-
-      // Direct match first
-      for (const [wssiLabel, riskLabel] of Object.entries(WSSI_TO_RISK_MAP)) {
-        if (value === wssiLabel || value.includes(wssiLabel)) {
-          return riskLabel;
-        }
+  try {
+    let result = features[0];
+    for (let i = 1; i < features.length; i++) {
+      const unioned = turf.union(
+        turf.featureCollection([result as turf.Feature<turf.Polygon | turf.MultiPolygon>, features[i] as turf.Feature<turf.Polygon | turf.MultiPolygon>])
+      );
+      if (unioned) {
+        result = unioned as GeoJSON.Feature;
       }
     }
+    return result;
+  } catch (err) {
+    console.error('Error unioning features:', err);
+    // Fallback: just return the first feature
+    return features[0];
   }
-
-  return 'Marginal Risk'; // Default
 }
 
 /**
- * Fetch WSSI data from ArcGIS MapServer
+ * Subtract geometry B from geometry A
  */
-async function fetchWSSIFromMapServer(day: number): Promise<{ geojson: GeoJSON.FeatureCollection; lastModified: string }> {
+function subtractGeometry(a: GeoJSON.Feature | null, b: GeoJSON.Feature | null): GeoJSON.Feature | null {
+  if (!a) return null;
+  if (!b) return a;
+
+  try {
+    const result = turf.difference(
+      turf.featureCollection([a as turf.Feature<turf.Polygon | turf.MultiPolygon>, b as turf.Feature<turf.Polygon | turf.MultiPolygon>])
+    );
+    return result as GeoJSON.Feature | null;
+  } catch (err) {
+    console.error('Error subtracting geometry:', err);
+    return a;
+  }
+}
+
+/**
+ * Process WSSI data into exclusive bands
+ */
+async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureCollection; lastModified: string; debug: DebugInfo }> {
   const layerId = WSSI_LAYER_IDS[day];
   if (!layerId) {
     throw new Error(`Invalid day: ${day}`);
   }
 
-  // Query the layer for all features as GeoJSON
+  // Fetch from ArcGIS MapServer
   const queryUrl = `${MAPSERVER_BASE}/${layerId}/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`;
 
   const response = await fetch(queryUrl, {
-    headers: {
-      'User-Agent': 'maxvelocitywx.com',
-    },
+    headers: { 'User-Agent': 'maxvelocitywx.com' },
   });
 
   if (!response.ok) {
@@ -164,75 +227,143 @@ async function fetchWSSIFromMapServer(day: number): Promise<{ geojson: GeoJSON.F
   }
 
   const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
-  const data = await response.json() as GeoJSON.FeatureCollection;
+  const rawData = await response.json() as GeoJSON.FeatureCollection;
 
-  if (!data.features || data.features.length === 0) {
+  const debug: DebugInfo = {
+    rawCounts: { elevated: 0, minor: 0, moderate: 0, major: 0, extreme: 0 },
+    bandedCounts: { elevated: 0, minor: 0, moderate: 0, major: 0, extreme: 0 },
+    unknownFeatures: 0,
+    totalFeatures: rawData.features?.length || 0,
+  };
+
+  if (!rawData.features || rawData.features.length === 0) {
     return {
       geojson: { type: 'FeatureCollection', features: [] },
       lastModified,
+      debug,
     };
   }
 
-  // Process features: simplify, smooth, and normalize attributes
-  const processedFeatures: GeoJSON.Feature[] = [];
+  // Step 1: Group features by category
+  const featuresByCategory: Record<WSSICategory, GeoJSON.Feature[]> = {
+    elevated: [],
+    minor: [],
+    moderate: [],
+    major: [],
+    extreme: [],
+  };
 
-  for (const feature of data.features) {
+  for (const feature of rawData.features) {
     if (!feature.geometry) continue;
+    if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') continue;
 
-    // Only process Polygon and MultiPolygon geometries
-    if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') {
+    const category = extractCategory((feature.properties || {}) as Record<string, unknown>);
+
+    if (category === null) {
+      debug.unknownFeatures++;
       continue;
     }
 
+    featuresByCategory[category].push(feature);
+    debug.rawCounts[category]++;
+  }
+
+  console.log(`[WSSI Day ${day}] Raw counts:`, debug.rawCounts, `Unknown: ${debug.unknownFeatures}`);
+
+  // Step 2: Union features within each category
+  const unionedByCategory: Record<WSSICategory, GeoJSON.Feature | null> = {
+    elevated: unionFeatures(featuresByCategory.elevated),
+    minor: unionFeatures(featuresByCategory.minor),
+    moderate: unionFeatures(featuresByCategory.moderate),
+    major: unionFeatures(featuresByCategory.major),
+    extreme: unionFeatures(featuresByCategory.extreme),
+  };
+
+  // Step 3: Build exclusive bands (subtract higher severity from lower)
+  // B_Extreme = U_Extreme
+  // B_Major = U_Major minus B_Extreme
+  // B_Moderate = U_Moderate minus (B_Major ∪ B_Extreme)
+  // etc.
+
+  const bandExtreme = unionedByCategory.extreme;
+
+  const bandMajor = subtractGeometry(unionedByCategory.major, bandExtreme);
+
+  const majorAndExtreme = unionFeatures([bandMajor, bandExtreme].filter(Boolean) as GeoJSON.Feature[]);
+  const bandModerate = subtractGeometry(unionedByCategory.moderate, majorAndExtreme);
+
+  const modMajExt = unionFeatures([bandModerate, bandMajor, bandExtreme].filter(Boolean) as GeoJSON.Feature[]);
+  const bandMinor = subtractGeometry(unionedByCategory.minor, modMajExt);
+
+  const minModMajExt = unionFeatures([bandMinor, bandModerate, bandMajor, bandExtreme].filter(Boolean) as GeoJSON.Feature[]);
+  const bandElevated = subtractGeometry(unionedByCategory.elevated, minModMajExt);
+
+  const exclusiveBands: Record<WSSICategory, GeoJSON.Feature | null> = {
+    elevated: bandElevated,
+    minor: bandMinor,
+    moderate: bandModerate,
+    major: bandMajor,
+    extreme: bandExtreme,
+  };
+
+  // Step 4: Smooth and create final features
+  const processedFeatures: GeoJSON.Feature[] = [];
+
+  for (const category of CATEGORY_ORDER) {
+    const band = exclusiveBands[category];
+    if (!band || !band.geometry) continue;
+
     try {
-      // Step 1: Simplify to remove jagged grid edges (higher tolerance = smoother)
-      let simplified = turf.simplify(feature as turf.AllGeoJSON, {
-        tolerance: 0.01,
+      // Simplify first
+      let processed = turf.simplify(band as turf.AllGeoJSON, {
+        tolerance: 0.008,
         highQuality: true,
       }) as GeoJSON.Feature;
 
-      // Step 2: Apply buffer trick to round sharp corners (larger buffer = rounder)
+      // Buffer trick for rounded corners
       try {
-        const bufferedOut = turf.buffer(simplified, 2, { units: 'kilometers' });
+        const bufferedOut = turf.buffer(processed, 1.5, { units: 'kilometers' });
         if (bufferedOut) {
-          const bufferedIn = turf.buffer(bufferedOut, -2, { units: 'kilometers' });
+          const bufferedIn = turf.buffer(bufferedOut, -1.5, { units: 'kilometers' });
           if (bufferedIn && bufferedIn.geometry) {
-            simplified = bufferedIn as GeoJSON.Feature;
+            processed = bufferedIn as GeoJSON.Feature;
           }
         }
       } catch {
-        // Buffer can fail on complex geometries, continue with simplified
+        // Continue with simplified if buffer fails
       }
 
-      // Step 3: Apply Chaikin smoothing (4 iterations in smoothPolygonCoords)
-      const smoothedGeometry = smoothGeometry(simplified.geometry!);
+      // Apply Chaikin smoothing
+      const smoothedGeometry = smoothGeometry(processed.geometry!);
 
-      // Extract and normalize properties
-      const originalProperties = (feature.properties || {}) as Record<string, unknown>;
-      const originalLabel = String(originalProperties.label || originalProperties.Label || originalProperties.idp_wssilabel || 'Unknown');
-      const riskLabel = extractImpactLevel(originalProperties);
-      const riskColor = RISK_COLORS[riskLabel] || '#60A5FA';
-      const riskOrder = RISK_ORDER[riskLabel] || 1;
+      const riskLabel = WSSI_TO_RISK[category];
+      const originalCategory = WSSI_CATEGORY_LABELS[category];
+      const riskColor = RISK_COLORS[riskLabel];
+      const riskOrder = RISK_ORDER[riskLabel];
 
       processedFeatures.push({
         type: 'Feature',
         geometry: smoothedGeometry,
         properties: {
           day,
+          category,
+          originalCategory,
           riskLabel,
-          originalLabel,
           riskColor,
           riskOrder,
           validTime: lastModified,
         },
       });
+
+      debug.bandedCounts[category] = 1;
     } catch (err) {
-      console.error('Error processing feature:', err);
-      // Skip problematic features
+      console.error(`Error processing ${category} band:`, err);
     }
   }
 
-  // Sort by risk order (lower risk rendered first, higher risk on top)
+  console.log(`[WSSI Day ${day}] Banded counts:`, debug.bandedCounts);
+
+  // Sort by risk order (lower severity first, so higher severity renders on top)
   processedFeatures.sort((a, b) =>
     (a.properties?.riskOrder || 0) - (b.properties?.riskOrder || 0)
   );
@@ -243,6 +374,7 @@ async function fetchWSSIFromMapServer(day: number): Promise<{ geojson: GeoJSON.F
       features: processedFeatures,
     },
     lastModified,
+    debug,
   };
 }
 
@@ -260,11 +392,18 @@ export async function GET(
     );
   }
 
+  // Check for debug parameter
+  const showDebug = request.nextUrl.searchParams.get('debug') === 'true';
+
   // Check cache
   const cacheKey = `wssi-day-${day}`;
   const cached = wssiCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return NextResponse.json(cached.data, {
+    const responseData = showDebug
+      ? { ...cached.data, _debug: cached.debug }
+      : cached.data;
+
+    return NextResponse.json(responseData, {
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'public, max-age=300',
@@ -274,16 +413,21 @@ export async function GET(
   }
 
   try {
-    const { geojson, lastModified } = await fetchWSSIFromMapServer(day);
+    const { geojson, lastModified, debug } = await processWSSIData(day);
 
     // Update cache
     wssiCache.set(cacheKey, {
       data: geojson,
       timestamp: Date.now(),
       lastModified,
+      debug,
     });
 
-    return NextResponse.json(geojson, {
+    const responseData = showDebug
+      ? { ...geojson, _debug: debug }
+      : geojson;
+
+    return NextResponse.json(responseData, {
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'public, max-age=300',
@@ -293,7 +437,6 @@ export async function GET(
   } catch (error) {
     console.error('Error processing WSSI data:', error);
 
-    // Return empty feature collection on error
     return NextResponse.json(
       {
         type: 'FeatureCollection',

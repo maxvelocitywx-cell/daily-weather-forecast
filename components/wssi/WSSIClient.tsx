@@ -166,11 +166,13 @@ export default function WSSIClient() {
     });
 
     // Add fill layers for each risk level (sorted by risk order)
+    // Layer order: fill (bottom) -> halo outline -> main outline (top)
     for (const risk of RISK_LEVELS) {
       const fillLayerId = `wssi-fill-${risk.label.replace(/\s+/g, '-').toLowerCase()}`;
+      const haloLayerId = `wssi-halo-${risk.label.replace(/\s+/g, '-').toLowerCase()}`;
       const outlineLayerId = `wssi-outline-${risk.label.replace(/\s+/g, '-').toLowerCase()}`;
 
-      // Fill layer
+      // Fill layer (bottom)
       m.addLayer({
         id: fillLayerId,
         type: 'fill',
@@ -182,15 +184,36 @@ export default function WSSIClient() {
         },
       }, firstSymbolId);
 
-      // Outline layer
+      // Halo outline layer (below main outline) - white glow effect
+      m.addLayer({
+        id: haloLayerId,
+        type: 'line',
+        source: 'wssi-data',
+        filter: ['==', ['get', 'riskLabel'], risk.label],
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+        },
+        paint: {
+          'line-color': 'rgba(255, 255, 255, 0.35)',
+          'line-width': 4,
+          'line-opacity': 1.0,
+        },
+      }, firstSymbolId);
+
+      // Main outline layer (above halo)
       m.addLayer({
         id: outlineLayerId,
         type: 'line',
         source: 'wssi-data',
         filter: ['==', ['get', 'riskLabel'], risk.label],
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+        },
         paint: {
           'line-color': risk.color,
-          'line-width': 1.5,
+          'line-width': 2,
           'line-opacity': 0.95,
         },
       }, firstSymbolId);
@@ -226,7 +249,7 @@ export default function WSSIClient() {
             <span style="width: 12px; height: 12px; border-radius: 2px; background-color: ${props.riskColor}; display: inline-block;"></span>
             <span style="color: white;">${props.riskLabel}</span>
           </div>
-          <div style="color: #9ca3af; font-size: 12px;">WSSI: ${props.originalLabel}</div>
+          <div style="color: #9ca3af; font-size: 12px;">WSSI: ${props.originalCategory || props.originalLabel || 'N/A'}</div>
         </div>
       `;
 
