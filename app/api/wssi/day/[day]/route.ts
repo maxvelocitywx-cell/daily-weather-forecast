@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as turf from '@turf/turf';
+import type { Feature, Polygon, MultiPolygon, FeatureCollection, Geometry } from 'geojson';
 
 export const runtime = 'nodejs';
 export const revalidate = 300; // 5 minute cache
@@ -55,7 +56,7 @@ const RISK_ORDER: Record<string, number> = {
 };
 
 // Cache
-const wssiCache = new Map<string, { data: GeoJSON.FeatureCollection; timestamp: number; lastModified: string; debug: DebugInfo }>();
+const wssiCache = new Map<string, { data: FeatureCollection; timestamp: number; lastModified: string; debug: DebugInfo }>();
 const CACHE_TTL = 5 * 60 * 1000;
 
 interface DebugInfo {
@@ -146,7 +147,7 @@ function smoothPolygonCoords(rings: number[][][]): number[][][] {
 /**
  * Smooth a GeoJSON geometry
  */
-function smoothGeometry(geometry: GeoJSON.Geometry): GeoJSON.Geometry {
+function smoothGeometry(geometry: Geometry): Geometry {
   if (geometry.type === 'Polygon') {
     return {
       type: 'Polygon',
@@ -163,43 +164,46 @@ function smoothGeometry(geometry: GeoJSON.Geometry): GeoJSON.Geometry {
   return geometry;
 }
 
+// Type alias for polygon features
+type PolygonFeature = Feature<Polygon | MultiPolygon>;
+
 /**
  * Union all features in an array into a single MultiPolygon
  */
-function unionFeatures(features: GeoJSON.Feature[]): GeoJSON.Feature | null {
+function unionFeatures(features: Feature[]): PolygonFeature | null {
   if (features.length === 0) return null;
-  if (features.length === 1) return features[0];
+  if (features.length === 1) return features[0] as PolygonFeature;
 
   try {
-    let result = features[0];
+    let result = features[0] as PolygonFeature;
     for (let i = 1; i < features.length; i++) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const fc = turf.featureCollection([result, features[i]]) as any;
-      const unioned = turf.union(fc);
+      // Turf v7 union takes a FeatureCollection
+      const fc = turf.featureCollection([result, features[i]]);
+      const unioned = turf.union(fc as Parameters<typeof turf.union>[0]);
       if (unioned) {
-        result = unioned as GeoJSON.Feature;
+        result = unioned as PolygonFeature;
       }
     }
     return result;
   } catch (err) {
     console.error('Error unioning features:', err);
     // Fallback: just return the first feature
-    return features[0];
+    return features[0] as PolygonFeature;
   }
 }
 
 /**
  * Subtract geometry B from geometry A
  */
-function subtractGeometry(a: GeoJSON.Feature | null, b: GeoJSON.Feature | null): GeoJSON.Feature | null {
+function subtractGeometry(a: PolygonFeature | null, b: PolygonFeature | null): PolygonFeature | null {
   if (!a) return null;
   if (!b) return a;
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const fc = turf.featureCollection([a, b]) as any;
-    const result = turf.difference(fc);
-    return result as GeoJSON.Feature | null;
+    // Turf v7 difference takes a FeatureCollection
+    const fc = turf.featureCollection([a, b]);
+    const result = turf.difference(fc as Parameters<typeof turf.difference>[0]);
+    return result as PolygonFeature | null;
   } catch (err) {
     console.error('Error subtracting geometry:', err);
     return a;
@@ -209,7 +213,7 @@ function subtractGeometry(a: GeoJSON.Feature | null, b: GeoJSON.Feature | null):
 /**
  * Process WSSI data into exclusive bands
  */
-async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureCollection; lastModified: string; debug: DebugInfo }> {
+async function processWSSIData(day: number): Promise<{ geojson: FeatureCollection; lastModified: string; debug: DebugInfo }> {
   const layerId = WSSI_LAYER_IDS[day];
   if (!layerId) {
     throw new Error(`Invalid day: ${day}`);
@@ -227,7 +231,7 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
   }
 
   const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
-  const rawData = await response.json() as GeoJSON.FeatureCollection;
+  const rawData = await response.json() as FeatureCollection;
 
   const debug: DebugInfo = {
     rawCounts: { elevated: 0, minor: 0, moderate: 0, major: 0, extreme: 0 },
@@ -245,7 +249,7 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
   }
 
   // Step 1: Group features by category
-  const featuresByCategory: Record<WSSICategory, GeoJSON.Feature[]> = {
+  const featuresByCategory: Record<WSSICategory, Feature[]> = {
     elevated: [],
     minor: [],
     moderate: [],
@@ -271,7 +275,7 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
   console.log(`[WSSI Day ${day}] Raw counts:`, debug.rawCounts, `Unknown: ${debug.unknownFeatures}`);
 
   // Step 2: Union features within each category
-  const unionedByCategory: Record<WSSICategory, GeoJSON.Feature | null> = {
+  const unionedByCategory: Record<WSSICategory, PolygonFeature | null> = {
     elevated: unionFeatures(featuresByCategory.elevated),
     minor: unionFeatures(featuresByCategory.minor),
     moderate: unionFeatures(featuresByCategory.moderate),
@@ -289,16 +293,16 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
 
   const bandMajor = subtractGeometry(unionedByCategory.major, bandExtreme);
 
-  const majorAndExtreme = unionFeatures([bandMajor, bandExtreme].filter(Boolean) as GeoJSON.Feature[]);
+  const majorAndExtreme = unionFeatures([bandMajor, bandExtreme].filter(Boolean) as Feature[]);
   const bandModerate = subtractGeometry(unionedByCategory.moderate, majorAndExtreme);
 
-  const modMajExt = unionFeatures([bandModerate, bandMajor, bandExtreme].filter(Boolean) as GeoJSON.Feature[]);
+  const modMajExt = unionFeatures([bandModerate, bandMajor, bandExtreme].filter(Boolean) as Feature[]);
   const bandMinor = subtractGeometry(unionedByCategory.minor, modMajExt);
 
-  const minModMajExt = unionFeatures([bandMinor, bandModerate, bandMajor, bandExtreme].filter(Boolean) as GeoJSON.Feature[]);
+  const minModMajExt = unionFeatures([bandMinor, bandModerate, bandMajor, bandExtreme].filter(Boolean) as Feature[]);
   const bandElevated = subtractGeometry(unionedByCategory.elevated, minModMajExt);
 
-  const exclusiveBands: Record<WSSICategory, GeoJSON.Feature | null> = {
+  const exclusiveBands: Record<WSSICategory, PolygonFeature | null> = {
     elevated: bandElevated,
     minor: bandMinor,
     moderate: bandModerate,
@@ -307,7 +311,7 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
   };
 
   // Step 4: Smooth and create final features
-  const processedFeatures: GeoJSON.Feature[] = [];
+  const processedFeatures: Feature[] = [];
 
   for (const category of CATEGORY_ORDER) {
     const band = exclusiveBands[category];
@@ -316,7 +320,7 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
     // Validate geometry before processing
     const geom = band.geometry;
     if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') {
-      console.log(`[WSSI] Skipping ${category} - invalid geometry type: ${geom.type}`);
+      console.log(`[WSSI] Skipping ${category} - invalid geometry type: ${(geom as Geometry).type}`);
       continue;
     }
 
@@ -334,12 +338,12 @@ async function processWSSIData(day: number): Promise<{ geojson: GeoJSON.FeatureC
 
     try {
       // Simplify geometry (skip expensive buffer/smoothing for serverless perf)
-      let processed: GeoJSON.Feature;
+      let processed: PolygonFeature;
       try {
-        processed = turf.simplify(band as turf.AllGeoJSON, {
+        processed = turf.simplify(band, {
           tolerance: 0.01, // Slightly more aggressive simplification
           highQuality: false, // Faster
-        }) as GeoJSON.Feature;
+        }) as PolygonFeature;
       } catch {
         // If simplify fails, use original
         processed = band;
