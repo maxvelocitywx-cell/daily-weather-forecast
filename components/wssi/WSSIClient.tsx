@@ -33,9 +33,15 @@ interface WSSIGeoJSON {
     properties: Record<string, unknown>;
   }>;
   error?: string;
+  status?: string; // For 202 Building response
+  message?: string;
 }
 
 type Resolution = 'overview' | 'detail';
+
+// Max poll attempts and delay
+const POLL_DELAY_MS = 3000;
+const MAX_POLL_ATTEMPTS = 20; // 60 seconds max
 
 export default function WSSIClient() {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -259,70 +265,92 @@ export default function WSSIClient() {
       setLoading(true);
       setError(null);
 
-      try {
-        const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
-          signal: controller.signal,
-        });
+      let pollAttempts = 0;
 
-        // Check if this request was aborted
-        if (controller.signal.aborted) {
-          console.log(`[WSSI] Fetch aborted: ${key}`);
-          return;
+      while (pollAttempts < MAX_POLL_ATTEMPTS) {
+        try {
+          const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
+            signal: controller.signal,
+          });
+
+          // Check if this request was aborted
+          if (controller.signal.aborted) {
+            console.log(`[WSSI] Fetch aborted: ${key}`);
+            return;
+          }
+
+          // Handle 202 Building response - poll again
+          if (response.status === 202) {
+            pollAttempts++;
+            console.log(`[WSSI] 202 Building - poll attempt ${pollAttempts}/${MAX_POLL_ATTEMPTS}`);
+
+            if (pollAttempts >= MAX_POLL_ATTEMPTS) {
+              throw new Error('Data computation timed out');
+            }
+
+            // Wait before polling again
+            await new Promise(resolve => setTimeout(resolve, POLL_DELAY_MS));
+            continue;
+          }
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          const data: WSSIGeoJSON = await response.json();
+
+          // Check abort again after parsing
+          if (controller.signal.aborted) {
+            console.log(`[WSSI] Fetch aborted after parse: ${key}`);
+            return;
+          }
+
+          if (data.error) {
+            throw new Error(data.error);
+          }
+
+          // Extract metrics from headers
+          const featureCount = response.headers.get('X-WSSI-Features');
+          const vertexCount = response.headers.get('X-WSSI-Vertices');
+          const byteCount = response.headers.get('X-WSSI-Bytes');
+          const lastModified = response.headers.get('X-WSSI-Last-Modified');
+
+          console.log(`[WSSI] Fetch success: ${key}, ${featureCount}f, ${vertexCount}v, ${byteCount}b`);
+
+          // Cache the data
+          dataCache.current[key] = data;
+          lastFetchKey.current = key;
+
+          // Update state
+          updateMapData(data);
+          setMetrics({
+            features: parseInt(featureCount || '0', 10),
+            vertices: parseInt(vertexCount || '0', 10),
+            bytes: parseInt(byteCount || '0', 10),
+          });
+          if (lastModified) {
+            setLastUpdate(new Date(lastModified).toLocaleString());
+          }
+          setError(null);
+
+          // Success - break out of poll loop
+          break;
+
+        } catch (err) {
+          // Don't set error if aborted
+          if (err instanceof Error && err.name === 'AbortError') {
+            console.log(`[WSSI] Fetch aborted (caught): ${key}`);
+            return;
+          }
+          console.error(`[WSSI] Fetch error: ${key}`, err);
+          setError(err instanceof Error ? err.message : 'Failed to load');
+          break;
         }
+      }
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const data: WSSIGeoJSON = await response.json();
-
-        // Check abort again after parsing
-        if (controller.signal.aborted) {
-          console.log(`[WSSI] Fetch aborted after parse: ${key}`);
-          return;
-        }
-
-        if (data.error) {
-          throw new Error(data.error);
-        }
-
-        // Extract metrics from headers
-        const featureCount = response.headers.get('X-WSSI-Features');
-        const vertexCount = response.headers.get('X-WSSI-Vertices');
-        const byteCount = response.headers.get('X-WSSI-Bytes');
-        const lastModified = response.headers.get('X-WSSI-Last-Modified');
-
-        console.log(`[WSSI] Fetch success: ${key}, ${featureCount}f, ${vertexCount}v, ${byteCount}b`);
-
-        // Cache the data
-        dataCache.current[key] = data;
-        lastFetchKey.current = key;
-
-        // Update state
-        updateMapData(data);
-        setMetrics({
-          features: parseInt(featureCount || '0', 10),
-          vertices: parseInt(vertexCount || '0', 10),
-          bytes: parseInt(byteCount || '0', 10),
-        });
-        if (lastModified) {
-          setLastUpdate(new Date(lastModified).toLocaleString());
-        }
-        setError(null);
-
-      } catch (err) {
-        // Don't set error if aborted
-        if (err instanceof Error && err.name === 'AbortError') {
-          console.log(`[WSSI] Fetch aborted (caught): ${key}`);
-          return;
-        }
-        console.error(`[WSSI] Fetch error: ${key}`, err);
-        setError(err instanceof Error ? err.message : 'Failed to load');
-      } finally {
-        // Only clear loading if this is still the current request
-        if (abortController.current === controller) {
-          setLoading(false);
-        }
+      // Only clear loading if this is still the current request
+      if (abortController.current === controller) {
+        setLoading(false);
       }
     };
 
@@ -382,43 +410,63 @@ export default function WSSIClient() {
       setLoading(true);
       setError(null);
 
-      try {
-        const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
-          signal: controller.signal,
-        });
+      let pollAttempts = 0;
 
-        if (controller.signal.aborted) return;
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      while (pollAttempts < MAX_POLL_ATTEMPTS) {
+        try {
+          const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
+            signal: controller.signal,
+          });
 
-        const data: WSSIGeoJSON = await response.json();
-        if (controller.signal.aborted) return;
-        if (data.error) throw new Error(data.error);
+          if (controller.signal.aborted) return;
 
-        const featureCount = response.headers.get('X-WSSI-Features');
-        const vertexCount = response.headers.get('X-WSSI-Vertices');
-        const byteCount = response.headers.get('X-WSSI-Bytes');
-        const lastModified = response.headers.get('X-WSSI-Last-Modified');
+          // Handle 202 Building response - poll again
+          if (response.status === 202) {
+            pollAttempts++;
+            console.log(`[WSSI] Refresh 202 Building - poll attempt ${pollAttempts}/${MAX_POLL_ATTEMPTS}`);
 
-        dataCache.current[key] = data;
-        lastFetchKey.current = key;
+            if (pollAttempts >= MAX_POLL_ATTEMPTS) {
+              throw new Error('Data computation timed out');
+            }
 
-        updateMapData(data);
-        setMetrics({
-          features: parseInt(featureCount || '0', 10),
-          vertices: parseInt(vertexCount || '0', 10),
-          bytes: parseInt(byteCount || '0', 10),
-        });
-        if (lastModified) {
-          setLastUpdate(new Date(lastModified).toLocaleString());
+            await new Promise(resolve => setTimeout(resolve, POLL_DELAY_MS));
+            continue;
+          }
+
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+          const data: WSSIGeoJSON = await response.json();
+          if (controller.signal.aborted) return;
+          if (data.error) throw new Error(data.error);
+
+          const featureCount = response.headers.get('X-WSSI-Features');
+          const vertexCount = response.headers.get('X-WSSI-Vertices');
+          const byteCount = response.headers.get('X-WSSI-Bytes');
+          const lastModified = response.headers.get('X-WSSI-Last-Modified');
+
+          dataCache.current[key] = data;
+          lastFetchKey.current = key;
+
+          updateMapData(data);
+          setMetrics({
+            features: parseInt(featureCount || '0', 10),
+            vertices: parseInt(vertexCount || '0', 10),
+            bytes: parseInt(byteCount || '0', 10),
+          });
+          if (lastModified) {
+            setLastUpdate(new Date(lastModified).toLocaleString());
+          }
+          setError(null);
+          break;
+        } catch (err) {
+          if (err instanceof Error && err.name === 'AbortError') return;
+          setError(err instanceof Error ? err.message : 'Failed to load');
+          break;
         }
-        setError(null);
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') return;
-        setError(err instanceof Error ? err.message : 'Failed to load');
-      } finally {
-        if (abortController.current === controller) {
-          setLoading(false);
-        }
+      }
+
+      if (abortController.current === controller) {
+        setLoading(false);
       }
     };
 

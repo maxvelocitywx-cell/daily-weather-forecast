@@ -1,10 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as turf from '@turf/turf';
+import { kv } from '@vercel/kv';
 import type { Feature, FeatureCollection, Polygon, MultiPolygon, Position } from 'geojson';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
+
+// Timing helper
+function logTiming(label: string, startTime: number) {
+  const elapsed = Date.now() - startTime;
+  console.log(`[WSSI] ${label}: ${elapsed}ms`);
+  return elapsed;
+}
 
 // ArcGIS MapServer layer IDs for Overall Impact
 const WSSI_LAYER_IDS: Record<number, number> = {
@@ -48,19 +56,22 @@ const SMOOTH_PARAMS = {
   },
 };
 
-// Cache with processed results
-interface CacheEntry {
-  overview: FeatureCollection;
-  detail: FeatureCollection;
-  timestamp: number;
-  lastModified: string;
+// KV cache key format: wssi:{day}:{res}:{lastModified}
+// Lock key format: wssi:lock:{day}:{res}
+const KV_CACHE_TTL = 15 * 60; // 15 minutes in seconds
+const LOCK_TTL = 60; // 60 seconds lock timeout
+
+interface KVCacheEntry {
+  geojson: FeatureCollection;
   metrics: {
-    overview: { featureCount: number; vertexCount: number; componentCount: number; bytes: number };
-    detail: { featureCount: number; vertexCount: number; componentCount: number; bytes: number };
+    featureCount: number;
+    vertexCount: number;
+    componentCount: number;
+    bytes: number;
   };
+  lastModified: string;
+  timestamp: number;
 }
-const wssiCache = new Map<string, CacheEntry>();
-const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 
 type PolygonFeature = Feature<Polygon | MultiPolygon>;
 
@@ -397,6 +408,35 @@ function processWSSIData(
 }
 
 /**
+ * HEAD request to get Last-Modified without downloading data
+ */
+async function getLastModified(day: number): Promise<string> {
+  const layerId = WSSI_LAYER_IDS[day];
+  if (!layerId) throw new Error(`Invalid day: ${day}`);
+
+  const queryUrl = `${MAPSERVER_BASE}/${layerId}/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`;
+
+  try {
+    const response = await fetch(queryUrl, {
+      method: 'HEAD',
+      headers: { 'User-Agent': 'maxvelocitywx.com' },
+    });
+
+    // ArcGIS might not support HEAD, use Date header or generate key
+    const lastModified = response.headers.get('Last-Modified')
+      || response.headers.get('Date')
+      || new Date().toISOString();
+
+    return lastModified;
+  } catch {
+    // Fallback: use current timestamp rounded to 15 min for cache coherency
+    const now = Date.now();
+    const rounded = Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000);
+    return new Date(rounded).toISOString();
+  }
+}
+
+/**
  * Fetch raw data from NOAA
  */
 async function fetchRawWSSI(day: number): Promise<{ features: Feature[]; lastModified: string }> {
@@ -420,7 +460,9 @@ async function fetchRawWSSI(day: number): Promise<{ features: Feature[]; lastMod
       throw new Error(`NOAA API error: ${response.status}`);
     }
 
-    const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
+    const lastModified = response.headers.get('Last-Modified')
+      || response.headers.get('Date')
+      || new Date().toISOString();
     const rawData = await response.json() as FeatureCollection;
 
     return {
@@ -440,6 +482,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ day: string }> }
 ) {
+  const totalStart = Date.now();
   const { day: dayStr } = await params;
   const day = parseInt(dayStr, 10);
 
@@ -455,44 +498,103 @@ export async function GET(
   const res = searchParams.get('res') as 'overview' | 'detail' | null;
   const resolution = res === 'detail' ? 'detail' : 'overview';
 
-  const cacheKey = `wssi-day-${day}`;
-  const cached = wssiCache.get(cacheKey);
-
-  // Return cached data if valid
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    const geojson = resolution === 'detail' ? cached.detail : cached.overview;
-    const metrics = resolution === 'detail' ? cached.metrics.detail : cached.metrics.overview;
-
-    return new NextResponse(JSON.stringify(geojson), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
-        'X-WSSI-Last-Modified': cached.lastModified,
-        'X-WSSI-Features': String(metrics.featureCount),
-        'X-WSSI-Vertices': String(metrics.vertexCount),
-        'X-WSSI-Components': String(metrics.componentCount),
-        'X-WSSI-Bytes': String(metrics.bytes),
-        'X-WSSI-Resolution': resolution,
-        'X-WSSI-Cached': 'true',
-      },
-    });
-  }
+  console.log(`[WSSI] Request: day=${day}, res=${resolution}`);
 
   try {
-    console.log(`[WSSI] Processing day ${day}...`);
-    const startTime = Date.now();
+    // Step 1: Get Last-Modified to build cache key
+    const headStart = Date.now();
+    const lastModified = await getLastModified(day);
+    // Sanitize lastModified for use in cache key (remove colons, spaces)
+    const lastModKey = lastModified.replace(/[:\s]/g, '-').substring(0, 24);
+    logTiming('HEAD request', headStart);
 
-    // Fetch raw data
-    const { features, lastModified } = await fetchRawWSSI(day);
-    console.log(`[WSSI] Fetched ${features.length} raw features in ${Date.now() - startTime}ms`);
+    const cacheKey = `wssi:${day}:${resolution}:${lastModKey}`;
+    const lockKey = `wssi:lock:${day}:${resolution}`;
+    console.log(`[WSSI] Cache key: ${cacheKey}`);
+
+    // Step 2: Check KV cache
+    const cacheStart = Date.now();
+    let cached: KVCacheEntry | null = null;
+    try {
+      cached = await kv.get<KVCacheEntry>(cacheKey);
+    } catch (kvErr) {
+      console.warn('[WSSI] KV get error (continuing):', kvErr);
+    }
+    logTiming('KV cache check', cacheStart);
+
+    // Return cached data if valid
+    if (cached) {
+      console.log(`[WSSI] Cache HIT - returning cached data`);
+      logTiming('TOTAL (cached)', totalStart);
+
+      return new NextResponse(JSON.stringify(cached.geojson), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
+          'X-WSSI-Last-Modified': cached.lastModified,
+          'X-WSSI-Features': String(cached.metrics.featureCount),
+          'X-WSSI-Vertices': String(cached.metrics.vertexCount),
+          'X-WSSI-Components': String(cached.metrics.componentCount),
+          'X-WSSI-Bytes': String(cached.metrics.bytes),
+          'X-WSSI-Resolution': resolution,
+          'X-WSSI-Cached': 'true',
+        },
+      });
+    }
+
+    console.log(`[WSSI] Cache MISS - checking lock`);
+
+    // Step 3: Check for existing lock (another request is computing)
+    const lockStart = Date.now();
+    let lockExists = false;
+    try {
+      lockExists = await kv.exists(lockKey) === 1;
+    } catch (kvErr) {
+      console.warn('[WSSI] KV lock check error (continuing):', kvErr);
+    }
+    logTiming('Lock check', lockStart);
+
+    if (lockExists) {
+      console.log(`[WSSI] Lock exists - returning 202 Building`);
+      return NextResponse.json(
+        { status: 'building', message: 'Data is being computed, please retry in 2-3 seconds' },
+        {
+          status: 202,
+          headers: {
+            'Retry-After': '3',
+            'Cache-Control': 'no-store',
+          },
+        }
+      );
+    }
+
+    // Step 4: Set lock to prevent stampede
+    const setLockStart = Date.now();
+    try {
+      await kv.set(lockKey, '1', { ex: LOCK_TTL });
+    } catch (kvErr) {
+      console.warn('[WSSI] KV lock set error (continuing):', kvErr);
+    }
+    logTiming('Set lock', setLockStart);
+
+    console.log(`[WSSI] Processing day ${day} (${resolution})...`);
+
+    // Step 5: Fetch raw data from NOAA
+    const fetchStart = Date.now();
+    const { features, lastModified: fetchedLastMod } = await fetchRawWSSI(day);
+    logTiming('NOAA fetch', fetchStart);
+    console.log(`[WSSI] Fetched ${features.length} raw features`);
 
     if (features.length === 0) {
+      // Clear lock
+      try { await kv.del(lockKey); } catch { /* ignore */ }
+
       const emptyResult: FeatureCollection = { type: 'FeatureCollection', features: [] };
       return NextResponse.json(emptyResult, {
         headers: {
           'Content-Type': 'application/json',
           'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
-          'X-WSSI-Last-Modified': lastModified,
+          'X-WSSI-Last-Modified': fetchedLastMod,
           'X-WSSI-Features': '0',
           'X-WSSI-Vertices': '0',
           'X-WSSI-Components': '0',
@@ -501,54 +603,59 @@ export async function GET(
       });
     }
 
-    // Process both resolutions
+    // Step 6: Process ONLY the requested resolution (not both)
     const processStart = Date.now();
-    const overviewResult = processWSSIData(features, day, 'overview', lastModified);
-    const detailResult = processWSSIData(features, day, 'detail', lastModified);
-    console.log(`[WSSI] Processing took ${Date.now() - processStart}ms`);
+    const result = processWSSIData(features, day, resolution, fetchedLastMod);
+    logTiming('Processing', processStart);
 
-    const overviewPayload = JSON.stringify(overviewResult.geojson);
-    const detailPayload = JSON.stringify(detailResult.geojson);
+    const payload = JSON.stringify(result.geojson);
+    const metrics = { ...result.metrics, bytes: payload.length };
 
-    // Cache both versions
-    wssiCache.set(cacheKey, {
-      overview: overviewResult.geojson,
-      detail: detailResult.geojson,
+    console.log(`[WSSI] ${resolution}: ${metrics.featureCount}f, ${metrics.vertexCount}v, ${metrics.componentCount}c, ${(metrics.bytes / 1024).toFixed(1)}KB`);
+
+    // Step 7: Store in KV cache
+    const storeStart = Date.now();
+    const cacheEntry: KVCacheEntry = {
+      geojson: result.geojson,
+      metrics,
+      lastModified: fetchedLastMod,
       timestamp: Date.now(),
-      lastModified,
-      metrics: {
-        overview: { ...overviewResult.metrics, bytes: overviewPayload.length },
-        detail: { ...detailResult.metrics, bytes: detailPayload.length },
-      },
-    });
+    };
+    try {
+      await kv.set(cacheKey, cacheEntry, { ex: KV_CACHE_TTL });
+    } catch (kvErr) {
+      console.warn('[WSSI] KV store error (continuing):', kvErr);
+    }
+    logTiming('KV store', storeStart);
 
-    const totalTime = Date.now() - startTime;
-    console.log(`[WSSI] Day ${day} complete in ${totalTime}ms`);
-    console.log(`[WSSI]   Overview: ${overviewResult.metrics.featureCount}f, ${overviewResult.metrics.vertexCount}v, ${overviewResult.metrics.componentCount}c, ${(overviewPayload.length / 1024).toFixed(1)}KB`);
-    console.log(`[WSSI]   Detail: ${detailResult.metrics.featureCount}f, ${detailResult.metrics.vertexCount}v, ${detailResult.metrics.componentCount}c, ${(detailPayload.length / 1024).toFixed(1)}KB`);
+    // Step 8: Clear lock
+    try { await kv.del(lockKey); } catch { /* ignore */ }
 
-    // Return requested resolution
-    const resultGeojson = resolution === 'detail' ? detailResult.geojson : overviewResult.geojson;
-    const resultMetrics = resolution === 'detail'
-      ? { ...detailResult.metrics, bytes: detailPayload.length }
-      : { ...overviewResult.metrics, bytes: overviewPayload.length };
-    const payload = resolution === 'detail' ? detailPayload : overviewPayload;
+    const totalTime = logTiming('TOTAL', totalStart);
+    console.log(`[WSSI] Day ${day} (${resolution}) complete`);
 
     return new NextResponse(payload, {
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
-        'X-WSSI-Last-Modified': lastModified,
-        'X-WSSI-Features': String(resultMetrics.featureCount),
-        'X-WSSI-Vertices': String(resultMetrics.vertexCount),
-        'X-WSSI-Components': String(resultMetrics.componentCount),
-        'X-WSSI-Bytes': String(resultMetrics.bytes),
+        'X-WSSI-Last-Modified': fetchedLastMod,
+        'X-WSSI-Features': String(metrics.featureCount),
+        'X-WSSI-Vertices': String(metrics.vertexCount),
+        'X-WSSI-Components': String(metrics.componentCount),
+        'X-WSSI-Bytes': String(metrics.bytes),
         'X-WSSI-Resolution': resolution,
         'X-WSSI-Processing-Time': String(totalTime),
+        'X-WSSI-Cached': 'false',
       },
     });
   } catch (error) {
     console.error('[WSSI] Error:', error);
+
+    // Try to clear lock on error
+    try {
+      const lastModKey = new Date().toISOString().replace(/[:\s]/g, '-').substring(0, 24);
+      await kv.del(`wssi:lock:${day}:${resolution}`);
+    } catch { /* ignore */ }
 
     return NextResponse.json(
       {
