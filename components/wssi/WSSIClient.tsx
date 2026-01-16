@@ -8,7 +8,13 @@ import { Snowflake, RefreshCw } from 'lucide-react';
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
 
-// Risk levels for legend (in order of severity - low to high)
+// Custom Mapbox style - NEVER change after init
+const MAPBOX_STYLE = 'mapbox://styles/maxvelocity/cmkew9qqf003y01rxdwxp37k4';
+
+// Zoom threshold for resolution switching
+const DETAIL_ZOOM_THRESHOLD = 6;
+
+// Risk levels for legend
 const RISK_LEVELS = [
   { label: 'Marginal Risk', wssiLabel: 'Winter Weather Area', color: '#60A5FA' },
   { label: 'Slight Risk', wssiLabel: 'Minor Impacts', color: '#2563EB' },
@@ -17,63 +23,136 @@ const RISK_LEVELS = [
   { label: 'High Risk', wssiLabel: 'Extreme Impacts', color: '#DC2626' },
 ];
 
-// Available days
 const DAYS = [1, 2, 3];
-
-interface WSSIFeature {
-  type: 'Feature';
-  geometry: GeoJSON.Geometry;
-  properties: {
-    day: number;
-    category: string;
-    riskLabel: string;
-    originalLabel: string;
-    riskColor: string;
-    riskOrder: number;
-    validTime: string;
-  };
-}
 
 interface WSSIGeoJSON {
   type: 'FeatureCollection';
-  features: WSSIFeature[];
+  features: Array<{
+    type: 'Feature';
+    geometry: GeoJSON.Geometry;
+    properties: Record<string, unknown>;
+  }>;
   error?: string;
 }
+
+type Resolution = 'overview' | 'detail';
 
 export default function WSSIClient() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const popup = useRef<mapboxgl.Popup | null>(null);
+  const sourceAdded = useRef(false);
+  const layersAdded = useRef(false);
 
   const [mapLoaded, setMapLoaded] = useState(false);
   const [selectedDay, setSelectedDay] = useState(1);
-  const [wssiData, setWssiData] = useState<Record<number, WSSIGeoJSON>>({});
-  const [loading, setLoading] = useState<Record<number, boolean>>({});
+  const [currentResolution, setCurrentResolution] = useState<Resolution>('overview');
+  const [loading, setLoading] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<{ features: number; vertices: number; bytes: number } | null>(null);
 
-  // Debounce ref for day changes
-  const dayChangeTimeout = useRef<NodeJS.Timeout | null>(null);
+  // Cache: day -> { overview: data, detail: data }
+  const dataCache = useRef<Record<number, Record<Resolution, WSSIGeoJSON | null>>>({});
 
-  // Fetch pre-processed WSSI data from server
-  const fetchWSSIData = useCallback(async (day: number) => {
-    // Skip if already loading this day
-    if (loading[day]) return;
+  // Track last fetched to prevent duplicate requests
+  const lastFetch = useRef<{ day: number; resolution: Resolution } | null>(null);
 
-    setLoading(prev => ({ ...prev, [day]: true }));
+  // Add WSSI layers to map (called once after style loads)
+  const addWSSILayers = useCallback(() => {
+    if (!map.current || layersAdded.current) return;
+
+    // Add source if not exists
+    if (!sourceAdded.current) {
+      map.current.addSource('wssi', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      sourceAdded.current = true;
+    }
+
+    // Add fill layer
+    map.current.addLayer({
+      id: 'wssi-fill',
+      type: 'fill',
+      source: 'wssi',
+      paint: {
+        'fill-color': ['get', 'riskColor'],
+        'fill-opacity': 0.6,
+      },
+    });
+
+    // Add outline layer
+    map.current.addLayer({
+      id: 'wssi-outline',
+      type: 'line',
+      source: 'wssi',
+      paint: {
+        'line-color': ['get', 'riskColor'],
+        'line-width': 2,
+        'line-opacity': 0.9,
+      },
+    });
+
+    // Hover effects
+    map.current.on('mouseenter', 'wssi-fill', () => {
+      if (map.current) map.current.getCanvas().style.cursor = 'pointer';
+    });
+
+    map.current.on('mouseleave', 'wssi-fill', () => {
+      if (map.current) map.current.getCanvas().style.cursor = '';
+      popup.current?.remove();
+    });
+
+    map.current.on('mousemove', 'wssi-fill', (e) => {
+      if (!e.features?.length || !popup.current || !map.current) return;
+
+      const feature = e.features[0];
+      const props = feature.properties;
+
+      popup.current
+        .setLngLat(e.lngLat)
+        .setHTML(`
+          <div style="padding: 8px;">
+            <div style="font-weight: 600; color: ${props?.riskColor || '#fff'}; margin-bottom: 4px;">
+              ${props?.riskLabel || 'Unknown'}
+            </div>
+            <div style="font-size: 12px; color: #9CA3AF;">
+              ${props?.originalLabel || ''}
+            </div>
+          </div>
+        `)
+        .addTo(map.current);
+    });
+
+    layersAdded.current = true;
+  }, []);
+
+  // Fetch WSSI data for a day/resolution
+  const fetchWSSIData = useCallback(async (day: number, resolution: Resolution) => {
+    // Check cache first
+    if (dataCache.current[day]?.[resolution]) {
+      return dataCache.current[day][resolution];
+    }
+
+    // Prevent duplicate fetches
+    if (lastFetch.current?.day === day && lastFetch.current?.resolution === resolution) {
+      return null;
+    }
+    lastFetch.current = { day, resolution };
+
+    setLoading(true);
     setError(null);
 
     try {
-      // Use overview resolution for performance (server does all processing)
-      const response = await fetch(`/api/wssi/day/${day}?res=overview`);
+      const response = await fetch(`/api/wssi/day/${day}?res=${resolution}`);
       const lastModified = response.headers.get('X-WSSI-Last-Modified');
       const featureCount = response.headers.get('X-WSSI-Features');
       const vertexCount = response.headers.get('X-WSSI-Vertices');
       const byteCount = response.headers.get('X-WSSI-Bytes');
 
       if (!response.ok) {
-        throw new Error(`Failed to fetch WSSI data: ${response.status}`);
+        throw new Error(`Failed to fetch: ${response.status}`);
       }
 
       const data: WSSIGeoJSON = await response.json();
@@ -82,36 +161,56 @@ export default function WSSIClient() {
         throw new Error(data.error);
       }
 
-      // Update state with pre-processed data (NO client-side processing!)
-      setWssiData(prev => ({ ...prev, [day]: data }));
+      // Cache the data
+      if (!dataCache.current[day]) {
+        dataCache.current[day] = { overview: null, detail: null };
+      }
+      dataCache.current[day][resolution] = data;
 
       if (lastModified) {
         setLastUpdate(new Date(lastModified).toLocaleString());
       }
 
-      // Update metrics for debugging
       setMetrics({
         features: parseInt(featureCount || '0', 10),
         vertices: parseInt(vertexCount || '0', 10),
         bytes: parseInt(byteCount || '0', 10),
       });
 
-      console.log(`[WSSI Client] Day ${day}: ${featureCount} features, ${vertexCount} vertices, ${((parseInt(byteCount || '0', 10)) / 1024).toFixed(1)} KB`);
-    } catch (err) {
-      console.error('Error fetching WSSI data:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load WSSI data');
-    } finally {
-      setLoading(prev => ({ ...prev, [day]: false }));
-    }
-  }, [loading]);
+      console.log(`[WSSI] Day ${day} ${resolution}: ${featureCount}f, ${vertexCount}v, ${((parseInt(byteCount || '0', 10)) / 1024).toFixed(1)}KB`);
 
-  // Initialize map
+      return data;
+    } catch (err) {
+      console.error('Error fetching WSSI:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load');
+      return null;
+    } finally {
+      setLoading(false);
+      lastFetch.current = null;
+    }
+  }, []);
+
+  // Update map source with data
+  const updateMapData = useCallback((data: WSSIGeoJSON | null) => {
+    if (!map.current || !sourceAdded.current) return;
+
+    const source = map.current.getSource('wssi') as mapboxgl.GeoJSONSource;
+    if (!source) return;
+
+    if (data) {
+      source.setData(data);
+    } else {
+      source.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, []);
+
+  // Initialize map ONCE
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
 
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: MAPBOX_STYLE,
       center: [-98, 39],
       zoom: 3.5,
       minZoom: 2,
@@ -127,134 +226,59 @@ export default function WSSIClient() {
     });
 
     map.current.on('load', () => {
-      if (!map.current) return;
-
-      // Add empty source - will be populated when data loads
-      map.current.addSource('wssi', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: [] },
-      });
-
-      // Add fill layer
-      map.current.addLayer({
-        id: 'wssi-fill',
-        type: 'fill',
-        source: 'wssi',
-        paint: {
-          'fill-color': ['get', 'riskColor'],
-          'fill-opacity': 0.6,
-        },
-      });
-
-      // Add outline layer
-      map.current.addLayer({
-        id: 'wssi-outline',
-        type: 'line',
-        source: 'wssi',
-        paint: {
-          'line-color': ['get', 'riskColor'],
-          'line-width': 2,
-          'line-opacity': 0.9,
-        },
-      });
-
-      // Hover effects
-      map.current.on('mouseenter', 'wssi-fill', () => {
-        if (map.current) map.current.getCanvas().style.cursor = 'pointer';
-      });
-
-      map.current.on('mouseleave', 'wssi-fill', () => {
-        if (map.current) map.current.getCanvas().style.cursor = '';
-        popup.current?.remove();
-      });
-
-      map.current.on('mousemove', 'wssi-fill', (e) => {
-        if (!e.features?.length || !popup.current || !map.current) return;
-
-        const feature = e.features[0];
-        const props = feature.properties;
-
-        popup.current
-          .setLngLat(e.lngLat)
-          .setHTML(`
-            <div style="padding: 8px;">
-              <div style="font-weight: 600; color: ${props?.riskColor || '#fff'}; margin-bottom: 4px;">
-                ${props?.riskLabel || 'Unknown'}
-              </div>
-              <div style="font-size: 12px; color: #9CA3AF;">
-                ${props?.originalLabel || ''}
-              </div>
-            </div>
-          `)
-          .addTo(map.current);
-      });
-
+      addWSSILayers();
       setMapLoaded(true);
+    });
+
+    // Handle style reload (if style changes externally)
+    map.current.on('style.load', () => {
+      sourceAdded.current = false;
+      layersAdded.current = false;
+      addWSSILayers();
+    });
+
+    // Zoom-based resolution switching
+    map.current.on('zoomend', () => {
+      if (!map.current) return;
+      const zoom = map.current.getZoom();
+      const newRes: Resolution = zoom >= DETAIL_ZOOM_THRESHOLD ? 'detail' : 'overview';
+      if (newRes !== currentResolution) {
+        setCurrentResolution(newRes);
+      }
     });
 
     return () => {
       popup.current?.remove();
       map.current?.remove();
       map.current = null;
+      sourceAdded.current = false;
+      layersAdded.current = false;
     };
-  }, []);
+  }, [addWSSILayers, currentResolution]);
 
-  // Update map when data or day changes (debounced)
+  // Load data when day or resolution changes
   useEffect(() => {
-    if (!mapLoaded || !map.current) return;
+    if (!mapLoaded) return;
 
-    // Debounce day changes to prevent rapid re-renders
-    if (dayChangeTimeout.current) {
-      clearTimeout(dayChangeTimeout.current);
-    }
-
-    dayChangeTimeout.current = setTimeout(() => {
-      const source = map.current?.getSource('wssi') as mapboxgl.GeoJSONSource;
-      if (!source) return;
-
-      const data = wssiData[selectedDay];
-      if (data) {
-        // Set pre-processed data directly - NO processing here
-        source.setData(data);
-      } else {
-        // Clear and fetch
-        source.setData({ type: 'FeatureCollection', features: [] });
-        fetchWSSIData(selectedDay);
-      }
-    }, 100); // 100ms debounce
-
-    return () => {
-      if (dayChangeTimeout.current) {
-        clearTimeout(dayChangeTimeout.current);
-      }
+    const loadData = async () => {
+      const data = await fetchWSSIData(selectedDay, currentResolution);
+      updateMapData(data);
     };
-  }, [mapLoaded, selectedDay, wssiData, fetchWSSIData]);
 
-  // Fetch data for initial day
-  useEffect(() => {
-    if (mapLoaded && !wssiData[selectedDay] && !loading[selectedDay]) {
-      fetchWSSIData(selectedDay);
-    }
-  }, [mapLoaded, selectedDay, wssiData, loading, fetchWSSIData]);
+    loadData();
+  }, [mapLoaded, selectedDay, currentResolution, fetchWSSIData, updateMapData]);
 
   const handleDayChange = (day: number) => {
     setSelectedDay(day);
   };
 
   const handleRefresh = () => {
-    // Clear cached data for current day and refetch
-    setWssiData(prev => {
-      const newData = { ...prev };
-      delete newData[selectedDay];
-      return newData;
-    });
-    fetchWSSIData(selectedDay);
+    // Clear cache for current day and refetch
+    if (dataCache.current[selectedDay]) {
+      dataCache.current[selectedDay] = { overview: null, detail: null };
+    }
+    fetchWSSIData(selectedDay, currentResolution).then(updateMapData);
   };
-
-  // Check if current day has data
-  const currentDayData = wssiData[selectedDay];
-  const hasData = currentDayData && currentDayData.features.length > 0;
-  const isLoading = loading[selectedDay];
 
   return (
     <div className="h-screen bg-mv-bg-primary flex flex-col overflow-hidden">
@@ -273,18 +297,21 @@ export default function WSSIClient() {
                 Updated: {lastUpdate}
               </span>
             )}
+            <span className="text-xs text-cyan-400 font-mono hidden sm:inline">
+              {currentResolution}
+            </span>
             {metrics && (
               <span className="text-xs text-mv-text-muted hidden lg:inline font-mono">
-                {metrics.features}f / {metrics.vertices}v / {(metrics.bytes / 1024).toFixed(0)}KB
+                {metrics.features}f/{metrics.vertices}v/{(metrics.bytes / 1024).toFixed(0)}KB
               </span>
             )}
             <button
               onClick={handleRefresh}
-              disabled={isLoading}
+              disabled={loading}
               className="p-1.5 rounded hover:bg-white/10 transition-colors disabled:opacity-50"
               title="Refresh data"
             >
-              <RefreshCw size={16} className={`text-mv-text-muted ${isLoading ? 'animate-spin' : ''}`} />
+              <RefreshCw size={16} className={`text-mv-text-muted ${loading ? 'animate-spin' : ''}`} />
             </button>
           </div>
         </div>
@@ -339,6 +366,9 @@ export default function WSSIClient() {
               Winter Storm Severity Index (WSSI) from NOAA/NWS shows expected
               winter weather impacts over the next 3 days.
             </p>
+            <p className="mt-2 text-[10px]">
+              Zoom in for higher detail resolution.
+            </p>
           </section>
         </aside>
 
@@ -347,22 +377,13 @@ export default function WSSIClient() {
           <div ref={mapContainer} className="absolute inset-0" />
 
           {/* Loading overlay */}
-          {(!mapLoaded || isLoading) && (
+          {(!mapLoaded || loading) && (
             <div className="absolute inset-0 flex items-center justify-center bg-mv-bg-primary/80 z-10">
               <div className="flex flex-col items-center gap-3">
                 <div className="w-10 h-10 rounded-full border-2 border-cyan-500/30 border-t-cyan-500 animate-spin" />
                 <span className="text-sm text-mv-text-muted">
-                  {isLoading ? 'Loading WSSI data...' : 'Loading map...'}
+                  {loading ? 'Loading WSSI data...' : 'Loading map...'}
                 </span>
-              </div>
-            </div>
-          )}
-
-          {/* No data message */}
-          {mapLoaded && !isLoading && !hasData && !error && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
-              <div className="bg-mv-bg-secondary/95 backdrop-blur-sm text-mv-text-muted px-4 py-2 rounded-lg border border-white/10 text-sm">
-                No winter storm impacts forecast for Day {selectedDay}
               </div>
             </div>
           )}

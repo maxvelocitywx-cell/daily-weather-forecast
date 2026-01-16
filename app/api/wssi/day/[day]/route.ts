@@ -19,57 +19,27 @@ const MAPSERVER_BASE = 'https://mapservices.weather.noaa.gov/vector/rest/service
 type WSSICategory = 'elevated' | 'minor' | 'moderate' | 'major' | 'extreme';
 const CATEGORY_ORDER: WSSICategory[] = ['elevated', 'minor', 'moderate', 'major', 'extreme'];
 
-// Map WSSI categories to display labels
-const WSSI_CATEGORY_LABELS: Record<WSSICategory, string> = {
-  'elevated': 'Winter Weather Area',
-  'minor': 'Minor Impacts',
-  'moderate': 'Moderate Impacts',
-  'major': 'Major Impacts',
-  'extreme': 'Extreme Impacts',
+// Map to risk labels and colors
+const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string; color: string; order: number }> = {
+  'elevated': { label: 'Marginal Risk', originalLabel: 'Winter Weather Area', color: '#60A5FA', order: 1 },
+  'minor': { label: 'Slight Risk', originalLabel: 'Minor Impacts', color: '#2563EB', order: 2 },
+  'moderate': { label: 'Enhanced Risk', originalLabel: 'Moderate Impacts', color: '#7C3AED', order: 3 },
+  'major': { label: 'Moderate Risk', originalLabel: 'Major Impacts', color: '#A21CAF', order: 4 },
+  'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Map to risk labels
-const WSSI_TO_RISK: Record<WSSICategory, string> = {
-  'elevated': 'Marginal Risk',
-  'minor': 'Slight Risk',
-  'moderate': 'Enhanced Risk',
-  'major': 'Moderate Risk',
-  'extreme': 'High Risk',
-};
-
-// Risk colors
-const RISK_COLORS: Record<string, string> = {
-  'Marginal Risk': '#60A5FA',
-  'Slight Risk': '#2563EB',
-  'Enhanced Risk': '#7C3AED',
-  'Moderate Risk': '#A21CAF',
-  'High Risk': '#DC2626',
-};
-
-// Risk order for sorting
-const RISK_ORDER: Record<string, number> = {
-  'Marginal Risk': 1,
-  'Slight Risk': 2,
-  'Enhanced Risk': 3,
-  'Moderate Risk': 4,
-  'High Risk': 5,
-};
-
-// Simplification tolerances (in degrees, ~111km per degree at equator)
-// overview: ~10km tolerance, detail: ~2km tolerance
+// Simplification tolerances in DEGREES (Turf simplify works in coordinate units)
+// These translate to roughly: overview ~15-20km, detail ~3-5km at US latitudes
 const SIMPLIFY_TOLERANCE = {
-  overview: 0.1,   // ~11km - aggressive for national view
-  detail: 0.02,    // ~2.2km - lighter for zoomed view
+  overview: 0.15,  // ~16km at 40°N - very aggressive
+  detail: 0.03,    // ~3km at 40°N
 };
 
-// Minimum area thresholds (in square meters)
+// Minimum area thresholds in square meters
 const MIN_AREA = {
-  overview: 100_000_000, // 100 km² - drop small islands
-  detail: 25_000_000,    // 25 km²
+  overview: 500_000_000, // 500 km² - drop small islands aggressively
+  detail: 50_000_000,    // 50 km²
 };
-
-// Buffer for smoothing (in km) - small to avoid huge polygon bloat
-const SMOOTH_BUFFER_KM = 8;
 
 // Cache with processed results
 interface CacheEntry {
@@ -78,9 +48,8 @@ interface CacheEntry {
   timestamp: number;
   lastModified: string;
   metrics: {
-    featureCount: number;
-    vertexCount: number;
-    payloadBytes: number;
+    overview: { featureCount: number; vertexCount: number; componentCount: number; bytes: number };
+    detail: { featureCount: number; vertexCount: number; componentCount: number; bytes: number };
   };
 }
 const wssiCache = new Map<string, CacheEntry>();
@@ -116,17 +85,23 @@ function extractCategory(properties: Record<string, unknown>): WSSICategory | nu
 }
 
 /**
- * Count vertices in a feature
+ * Count vertices and components in a feature
  */
-function countVertices(feature: PolygonFeature): number {
+function countGeometry(feature: PolygonFeature): { vertices: number; components: number } {
   const geom = feature.geometry;
   if (geom.type === 'Polygon') {
-    return geom.coordinates.reduce((sum, ring) => sum + ring.length, 0);
+    return {
+      vertices: geom.coordinates.reduce((sum, ring) => sum + ring.length, 0),
+      components: 1,
+    };
   } else if (geom.type === 'MultiPolygon') {
-    return geom.coordinates.reduce((sum, poly) =>
-      sum + poly.reduce((s, ring) => s + ring.length, 0), 0);
+    return {
+      vertices: geom.coordinates.reduce((sum, poly) =>
+        sum + poly.reduce((s, ring) => s + ring.length, 0), 0),
+      components: geom.coordinates.length,
+    };
   }
-  return 0;
+  return { vertices: 0, components: 0 };
 }
 
 /**
@@ -184,23 +159,27 @@ function safeUnion(features: PolygonFeature[]): PolygonFeature | null {
   if (features.length === 1) return features[0];
 
   try {
-    let result = features[0];
-
-    for (let i = 1; i < features.length; i++) {
-      try {
-        const fc = turf.featureCollection([result, features[i]]);
-        const unioned = turf.union(fc as Parameters<typeof turf.union>[0]);
-        if (unioned) {
-          result = unioned as PolygonFeature;
-        }
-      } catch {
-        // Skip failed unions
-      }
-    }
-
-    return result;
+    // Use turf.union with feature collection
+    const fc = turf.featureCollection(features);
+    const result = turf.union(fc as Parameters<typeof turf.union>[0]);
+    return result as PolygonFeature | null;
   } catch {
-    return features[0];
+    // Fallback: try iterative union
+    try {
+      let result = features[0];
+      for (let i = 1; i < features.length; i++) {
+        try {
+          const fc = turf.featureCollection([result, features[i]]);
+          const unioned = turf.union(fc as Parameters<typeof turf.union>[0]);
+          if (unioned) result = unioned as PolygonFeature;
+        } catch {
+          // Skip failed unions
+        }
+      }
+      return result;
+    } catch {
+      return features[0];
+    }
   }
 }
 
@@ -221,23 +200,6 @@ function safeDifference(a: PolygonFeature | null, b: PolygonFeature | null): Pol
 }
 
 /**
- * Light morphological smoothing - buffer out then in
- */
-function smoothPolygon(feature: PolygonFeature, bufferKm: number): PolygonFeature | null {
-  try {
-    const bufferedOut = turf.buffer(feature, bufferKm, { units: 'kilometers', steps: 8 });
-    if (!bufferedOut?.geometry) return feature;
-
-    const bufferedIn = turf.buffer(bufferedOut as PolygonFeature, -bufferKm, { units: 'kilometers', steps: 8 });
-    if (!bufferedIn?.geometry) return feature;
-
-    return bufferedIn as PolygonFeature;
-  } catch {
-    return feature;
-  }
-}
-
-/**
  * Process raw WSSI data into dissolved, simplified exclusive bands
  */
 function processWSSIData(
@@ -245,7 +207,7 @@ function processWSSIData(
   day: number,
   resolution: 'overview' | 'detail',
   lastModified: string
-): { geojson: FeatureCollection; metrics: { featureCount: number; vertexCount: number } } {
+): { geojson: FeatureCollection; metrics: { featureCount: number; vertexCount: number; componentCount: number } } {
 
   const tolerance = SIMPLIFY_TOLERANCE[resolution];
   const minArea = MIN_AREA[resolution];
@@ -296,44 +258,35 @@ function processWSSIData(
     extreme: bandExtreme,
   };
 
-  // Process each band: smooth, simplify, remove fragments
+  // Process each band: simplify FIRST, then remove fragments
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
+  let totalComponents = 0;
 
   for (const category of CATEGORY_ORDER) {
     let band = exclusiveBands[category];
     if (!band?.geometry) continue;
 
-    // Check minimum total area
+    // Step 1: Aggressive simplification (in WGS84 degrees)
     try {
-      const area = turf.area(band);
-      if (area < minArea) continue;
-    } catch {
-      continue;
-    }
-
-    // Light smoothing (only for overview to reduce jaggedness)
-    if (resolution === 'overview') {
-      const smoothed = smoothPolygon(band, SMOOTH_BUFFER_KM);
-      if (smoothed) band = smoothed;
-    }
-
-    // Aggressive simplification
-    try {
-      const simplified = turf.simplify(band, { tolerance, highQuality: false });
+      const simplified = turf.simplify(band, {
+        tolerance,
+        highQuality: false, // Faster
+        mutate: false,
+      });
       if (simplified?.geometry) {
         band = simplified as PolygonFeature;
       }
     } catch {
-      // Keep unsimplified
+      // Keep unsimplified if it fails
     }
 
-    // Remove small fragments
+    // Step 2: Remove small fragments AFTER simplification
     const cleaned = removeSmallFragments(band, minArea);
     if (!cleaned) continue;
     band = cleaned;
 
-    // Final area check
+    // Step 3: Final area check
     try {
       const finalArea = turf.area(band);
       if (finalArea < minArea) continue;
@@ -341,9 +294,10 @@ function processWSSIData(
       continue;
     }
 
-    const riskLabel = WSSI_TO_RISK[category];
-    const vertices = countVertices(band);
+    const riskInfo = WSSI_TO_RISK[category];
+    const { vertices, components } = countGeometry(band);
     totalVertices += vertices;
+    totalComponents += components;
 
     processedFeatures.push({
       type: 'Feature',
@@ -351,10 +305,10 @@ function processWSSIData(
       properties: {
         day,
         category,
-        riskLabel,
-        originalLabel: WSSI_CATEGORY_LABELS[category],
-        riskColor: RISK_COLORS[riskLabel],
-        riskOrder: RISK_ORDER[riskLabel],
+        riskLabel: riskInfo.label,
+        originalLabel: riskInfo.originalLabel,
+        riskColor: riskInfo.color,
+        riskOrder: riskInfo.order,
         validTime: lastModified,
       },
     });
@@ -367,7 +321,7 @@ function processWSSIData(
 
   return {
     geojson: { type: 'FeatureCollection', features: processedFeatures },
-    metrics: { featureCount: processedFeatures.length, vertexCount: totalVertices },
+    metrics: { featureCount: processedFeatures.length, vertexCount: totalVertices, componentCount: totalComponents },
   };
 }
 
@@ -380,21 +334,35 @@ async function fetchRawWSSI(day: number): Promise<{ features: Feature[]; lastMod
 
   const queryUrl = `${MAPSERVER_BASE}/${layerId}/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`;
 
-  const response = await fetch(queryUrl, {
-    headers: { 'User-Agent': 'maxvelocitywx.com' },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000); // 25s timeout
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch WSSI data: ${response.status}`);
+  try {
+    const response = await fetch(queryUrl, {
+      headers: { 'User-Agent': 'maxvelocitywx.com' },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`NOAA API error: ${response.status}`);
+    }
+
+    const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
+    const rawData = await response.json() as FeatureCollection;
+
+    return {
+      features: rawData.features || [],
+      lastModified,
+    };
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('NOAA API timeout - try again');
+    }
+    throw error;
   }
-
-  const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
-  const rawData = await response.json() as FeatureCollection;
-
-  return {
-    features: rawData.features || [],
-    lastModified,
-  };
 }
 
 export async function GET(
@@ -422,17 +390,19 @@ export async function GET(
   // Return cached data if valid
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     const geojson = resolution === 'detail' ? cached.detail : cached.overview;
-    const payload = JSON.stringify(geojson);
+    const metrics = resolution === 'detail' ? cached.metrics.detail : cached.metrics.overview;
 
-    return new NextResponse(payload, {
+    return new NextResponse(JSON.stringify(geojson), {
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
         'X-WSSI-Last-Modified': cached.lastModified,
-        'X-WSSI-Features': String(cached.metrics.featureCount),
-        'X-WSSI-Vertices': String(cached.metrics.vertexCount),
-        'X-WSSI-Bytes': String(cached.metrics.payloadBytes),
+        'X-WSSI-Features': String(metrics.featureCount),
+        'X-WSSI-Vertices': String(metrics.vertexCount),
+        'X-WSSI-Components': String(metrics.componentCount),
+        'X-WSSI-Bytes': String(metrics.bytes),
         'X-WSSI-Resolution': resolution,
+        'X-WSSI-Cached': 'true',
       },
     });
   }
@@ -443,7 +413,7 @@ export async function GET(
 
     // Fetch raw data
     const { features, lastModified } = await fetchRawWSSI(day);
-    console.log(`[WSSI] Fetched ${features.length} raw features`);
+    console.log(`[WSSI] Fetched ${features.length} raw features in ${Date.now() - startTime}ms`);
 
     if (features.length === 0) {
       const emptyResult: FeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -454,15 +424,20 @@ export async function GET(
           'X-WSSI-Last-Modified': lastModified,
           'X-WSSI-Features': '0',
           'X-WSSI-Vertices': '0',
+          'X-WSSI-Components': '0',
+          'X-WSSI-Bytes': '0',
         },
       });
     }
 
     // Process both resolutions
+    const processStart = Date.now();
     const overviewResult = processWSSIData(features, day, 'overview', lastModified);
     const detailResult = processWSSIData(features, day, 'detail', lastModified);
+    console.log(`[WSSI] Processing took ${Date.now() - processStart}ms`);
 
     const overviewPayload = JSON.stringify(overviewResult.geojson);
+    const detailPayload = JSON.stringify(detailResult.geojson);
 
     // Cache both versions
     wssiCache.set(cacheKey, {
@@ -471,21 +446,22 @@ export async function GET(
       timestamp: Date.now(),
       lastModified,
       metrics: {
-        featureCount: overviewResult.metrics.featureCount,
-        vertexCount: overviewResult.metrics.vertexCount,
-        payloadBytes: overviewPayload.length,
+        overview: { ...overviewResult.metrics, bytes: overviewPayload.length },
+        detail: { ...detailResult.metrics, bytes: detailPayload.length },
       },
     });
 
-    const processingTime = Date.now() - startTime;
-    console.log(`[WSSI] Day ${day} processed in ${processingTime}ms`);
-    console.log(`[WSSI]   Overview: ${overviewResult.metrics.featureCount} features, ${overviewResult.metrics.vertexCount} vertices, ${(overviewPayload.length / 1024).toFixed(1)} KB`);
-    console.log(`[WSSI]   Detail: ${detailResult.metrics.featureCount} features, ${detailResult.metrics.vertexCount} vertices`);
+    const totalTime = Date.now() - startTime;
+    console.log(`[WSSI] Day ${day} complete in ${totalTime}ms`);
+    console.log(`[WSSI]   Overview: ${overviewResult.metrics.featureCount}f, ${overviewResult.metrics.vertexCount}v, ${overviewResult.metrics.componentCount}c, ${(overviewPayload.length / 1024).toFixed(1)}KB`);
+    console.log(`[WSSI]   Detail: ${detailResult.metrics.featureCount}f, ${detailResult.metrics.vertexCount}v, ${detailResult.metrics.componentCount}c, ${(detailPayload.length / 1024).toFixed(1)}KB`);
 
     // Return requested resolution
     const resultGeojson = resolution === 'detail' ? detailResult.geojson : overviewResult.geojson;
-    const resultMetrics = resolution === 'detail' ? detailResult.metrics : overviewResult.metrics;
-    const payload = JSON.stringify(resultGeojson);
+    const resultMetrics = resolution === 'detail'
+      ? { ...detailResult.metrics, bytes: detailPayload.length }
+      : { ...overviewResult.metrics, bytes: overviewPayload.length };
+    const payload = resolution === 'detail' ? detailPayload : overviewPayload;
 
     return new NextResponse(payload, {
       headers: {
@@ -494,9 +470,10 @@ export async function GET(
         'X-WSSI-Last-Modified': lastModified,
         'X-WSSI-Features': String(resultMetrics.featureCount),
         'X-WSSI-Vertices': String(resultMetrics.vertexCount),
-        'X-WSSI-Bytes': String(payload.length),
+        'X-WSSI-Components': String(resultMetrics.componentCount),
+        'X-WSSI-Bytes': String(resultMetrics.bytes),
         'X-WSSI-Resolution': resolution,
-        'X-WSSI-Processing-Time': String(processingTime),
+        'X-WSSI-Processing-Time': String(totalTime),
       },
     });
   } catch (error) {
@@ -512,7 +489,7 @@ export async function GET(
         status: 500,
         headers: {
           'Content-Type': 'application/json',
-          'Cache-Control': 'public, max-age=60',
+          'Cache-Control': 'public, max-age=30',
         },
       }
     );
