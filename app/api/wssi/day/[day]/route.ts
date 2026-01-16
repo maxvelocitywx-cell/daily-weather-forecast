@@ -28,24 +28,23 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters - FAST settings to avoid timeout
-// Key insight: simplify FIRST aggressively, then do small buffer ops
+// Smoothing parameters - ULTRA FAST settings
+// Skip buffer entirely for overview (just simplify), light buffer for detail
 const SMOOTH_PARAMS = {
   overview: {
-    preSimplifyTol: 0.08, // Simplify BEFORE buffer to reduce vertices
-    bufferOut: 15,        // Buffer out 15km (reduced from 40)
-    bufferIn: 15,         // Buffer in 15km
-    postSimplifyTol: 0.12, // Final simplification
-    minAreaKm2: 800,      // Min 800 km²
-    bufferSteps: 8,       // Minimal steps for speed
+    preSimplifyTol: 0.05,  // Aggressive pre-simplification
+    useBuffer: false,      // SKIP buffer for overview - too slow
+    postSimplifyTol: 0.08, // Moderate final simplification
+    minAreaKm2: 500,       // Min 500 km²
   },
   detail: {
-    preSimplifyTol: 0.02, // Light pre-simplification
-    bufferOut: 8,         // Buffer out 8km (reduced from 12)
-    bufferIn: 8,          // Buffer in 8km
-    postSimplifyTol: 0.03, // Final simplification
-    minAreaKm2: 80,       // Min 80 km²
-    bufferSteps: 12,      // Moderate steps
+    preSimplifyTol: 0.015, // Light pre-simplification
+    useBuffer: true,       // Only use buffer for detail
+    bufferOut: 5,          // Small buffer 5km
+    bufferIn: 5,           // Small buffer 5km
+    bufferSteps: 6,        // Minimal steps
+    postSimplifyTol: 0.02, // Light final simplification
+    minAreaKm2: 50,        // Min 50 km²
   },
 };
 
@@ -325,16 +324,18 @@ function processWSSIData(
       // Continue with original
     }
 
-    // Step 2: Morphological smoothing (buffer out then in)
-    // Now much faster because we have fewer vertices
-    const smoothed = morphologicalSmooth(
-      band,
-      params.bufferOut,
-      params.bufferIn,
-      params.bufferSteps
-    );
-    if (smoothed) {
-      band = smoothed;
+    // Step 2: Morphological smoothing (buffer out then in) - ONLY for detail
+    // Skip for overview to avoid timeout
+    if ('useBuffer' in params && params.useBuffer && 'bufferOut' in params) {
+      const smoothed = morphologicalSmooth(
+        band,
+        params.bufferOut as number,
+        params.bufferIn as number,
+        params.bufferSteps as number
+      );
+      if (smoothed) {
+        band = smoothed;
+      }
     }
 
     // Step 3: POST-SIMPLIFY the smoothed geometry
