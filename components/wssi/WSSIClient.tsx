@@ -14,9 +14,6 @@ const MAPBOX_STYLE = 'mapbox://styles/maxvelocity/cmkew9qqf003y01rxdwxp37k4';
 // Zoom threshold for resolution switching
 const DETAIL_ZOOM_THRESHOLD = 6;
 
-// Debounce delay for fetch (ms)
-const FETCH_DEBOUNCE_MS = 200;
-
 // Risk levels for legend
 const RISK_LEVELS = [
   { label: 'Marginal Risk', wssiLabel: 'Winter Weather Area', color: '#60A5FA' },
@@ -47,28 +44,33 @@ export default function WSSIClient() {
   const sourceAdded = useRef(false);
   const layersAdded = useRef(false);
 
-  // Debounce timer ref
-  const fetchDebounceTimer = useRef<NodeJS.Timeout | null>(null);
-
+  // State
   const [mapLoaded, setMapLoaded] = useState(false);
   const [selectedDay, setSelectedDay] = useState(1);
+  const [selectedRes, setSelectedRes] = useState<Resolution>('overview');
   const [loading, setLoading] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<{ features: number; vertices: number; bytes: number } | null>(null);
-  const [displayResolution, setDisplayResolution] = useState<Resolution>('overview');
 
-  // Cache: day -> { overview: data, detail: data }
-  const dataCache = useRef<Record<number, Record<Resolution, WSSIGeoJSON | null>>>({});
+  // Refs for fetch control - these prevent loops
+  const lastFetchKey = useRef<string | null>(null);
+  const abortController = useRef<AbortController | null>(null);
+  const dataCache = useRef<Record<string, WSSIGeoJSON>>({});
 
-  // Track current resolution (not in state to avoid re-renders)
-  const currentResolution = useRef<Resolution>('overview');
+  // Update map source with data
+  const updateMapData = useCallback((data: WSSIGeoJSON | null) => {
+    if (!map.current || !sourceAdded.current) return;
 
-  // Track current day for internal use
-  const currentDay = useRef<number>(1);
+    const source = map.current.getSource('wssi') as mapboxgl.GeoJSONSource;
+    if (!source) return;
 
-  // Track in-flight fetch to prevent duplicates
-  const inFlightFetch = useRef<string | null>(null);
+    if (data) {
+      source.setData(data);
+    } else {
+      source.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, []);
 
   // Add WSSI layers to map (called once after style loads)
   const addWSSILayers = useCallback(() => {
@@ -161,123 +163,11 @@ export default function WSSIClient() {
     layersAdded.current = true;
   }, []);
 
-  // Update map source with data (no state changes, just map update)
-  const updateMapData = useCallback((data: WSSIGeoJSON | null) => {
-    if (!map.current || !sourceAdded.current) return;
-
-    const source = map.current.getSource('wssi') as mapboxgl.GeoJSONSource;
-    if (!source) return;
-
-    if (data) {
-      source.setData(data);
-    } else {
-      source.setData({ type: 'FeatureCollection', features: [] });
-    }
-  }, []);
-
-  // Fetch WSSI data for a day/resolution - returns data, doesn't update state much
-  const fetchWSSIData = useCallback(async (day: number, resolution: Resolution): Promise<WSSIGeoJSON | null> => {
-    // Check cache first
-    if (dataCache.current[day]?.[resolution]) {
-      const cached = dataCache.current[day][resolution];
-      // Update display metrics from cache
-      if (cached && cached.features) {
-        setMetrics({
-          features: cached.features.length,
-          vertices: 0, // We don't have this from cache
-          bytes: 0,
-        });
-      }
-      return cached;
-    }
-
-    // Prevent duplicate in-flight fetches
-    const fetchKey = `${day}-${resolution}`;
-    if (inFlightFetch.current === fetchKey) {
-      return null;
-    }
-    inFlightFetch.current = fetchKey;
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const response = await fetch(`/api/wssi/day/${day}?res=${resolution}`);
-      const lastModified = response.headers.get('X-WSSI-Last-Modified');
-      const featureCount = response.headers.get('X-WSSI-Features');
-      const vertexCount = response.headers.get('X-WSSI-Vertices');
-      const byteCount = response.headers.get('X-WSSI-Bytes');
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch: ${response.status}`);
-      }
-
-      const data: WSSIGeoJSON = await response.json();
-
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
-      // Cache the data
-      if (!dataCache.current[day]) {
-        dataCache.current[day] = { overview: null, detail: null };
-      }
-      dataCache.current[day][resolution] = data;
-
-      if (lastModified) {
-        setLastUpdate(new Date(lastModified).toLocaleString());
-      }
-
-      setMetrics({
-        features: parseInt(featureCount || '0', 10),
-        vertices: parseInt(vertexCount || '0', 10),
-        bytes: parseInt(byteCount || '0', 10),
-      });
-
-      console.log(`[WSSI] Day ${day} ${resolution}: ${featureCount}f, ${vertexCount}v, ${((parseInt(byteCount || '0', 10)) / 1024).toFixed(1)}KB`);
-
-      return data;
-    } catch (err) {
-      console.error('Error fetching WSSI:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load');
-      return null;
-    } finally {
-      setLoading(false);
-      inFlightFetch.current = null;
-    }
-  }, []);
-
-  // Debounced load function - fetches and updates map
-  const loadDataDebounced = useCallback((day: number, resolution: Resolution) => {
-    // Clear any pending debounce
-    if (fetchDebounceTimer.current) {
-      clearTimeout(fetchDebounceTimer.current);
-    }
-
-    fetchDebounceTimer.current = setTimeout(async () => {
-      const data = await fetchWSSIData(day, resolution);
-      updateMapData(data);
-      setDisplayResolution(resolution);
-    }, FETCH_DEBOUNCE_MS);
-  }, [fetchWSSIData, updateMapData]);
-
-  // Handle zoom changes - compute resolution and trigger fetch if needed
-  const handleZoomEnd = useCallback(() => {
-    if (!map.current) return;
-
-    const zoom = map.current.getZoom();
-    const newRes: Resolution = zoom >= DETAIL_ZOOM_THRESHOLD ? 'detail' : 'overview';
-
-    // Only refetch if resolution actually changed
-    if (newRes !== currentResolution.current) {
-      currentResolution.current = newRes;
-      loadDataDebounced(currentDay.current, newRes);
-    }
-  }, [loadDataDebounced]);
-
-  // Initialize map ONCE - no state dependencies that could cause remount
+  // Initialize map ONCE - empty dependency array
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
+
+    console.log('[WSSI] Initializing map');
 
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
@@ -297,11 +187,9 @@ export default function WSSIClient() {
     });
 
     map.current.on('load', () => {
+      console.log('[WSSI] Map loaded');
       addWSSILayers();
       setMapLoaded(true);
-
-      // Initial data load after map is ready
-      loadDataDebounced(currentDay.current, currentResolution.current);
     });
 
     // Handle style reload (if style changes externally)
@@ -311,37 +199,232 @@ export default function WSSIClient() {
       addWSSILayers();
     });
 
-    // Zoom-based resolution switching - use zoomend (not zoom) to trigger once per interaction
-    map.current.on('zoomend', handleZoomEnd);
+    // Zoom-based resolution switching - use zoomend (not zoom)
+    map.current.on('zoomend', () => {
+      if (!map.current) return;
+      const zoom = map.current.getZoom();
+      const newRes: Resolution = zoom >= DETAIL_ZOOM_THRESHOLD ? 'detail' : 'overview';
+      setSelectedRes(prev => {
+        if (prev !== newRes) {
+          console.log(`[WSSI] Zoom changed resolution: ${prev} -> ${newRes}`);
+          return newRes;
+        }
+        return prev;
+      });
+    });
 
     return () => {
-      if (fetchDebounceTimer.current) {
-        clearTimeout(fetchDebounceTimer.current);
-      }
+      console.log('[WSSI] Cleaning up map');
       popup.current?.remove();
       map.current?.remove();
       map.current = null;
       sourceAdded.current = false;
       layersAdded.current = false;
     };
-  }, [addWSSILayers, handleZoomEnd, loadDataDebounced]);
+  }, [addWSSILayers]);
 
-  // Handle day change - only this state change triggers a refetch
-  const handleDayChange = useCallback((day: number) => {
-    setSelectedDay(day);
-    currentDay.current = day;
+  // Fetch data when day or resolution changes
+  // ONLY depends on mapLoaded, selectedDay, selectedRes - nothing else!
+  useEffect(() => {
+    if (!mapLoaded) return;
 
-    // Load data for new day at current resolution
-    loadDataDebounced(day, currentResolution.current);
-  }, [loadDataDebounced]);
+    const key = `${selectedDay}:${selectedRes}`;
 
-  const handleRefresh = useCallback(() => {
-    // Clear cache for current day and refetch
-    if (dataCache.current[currentDay.current]) {
-      dataCache.current[currentDay.current] = { overview: null, detail: null };
+    // Guard: don't refetch if we already fetched this key
+    if (lastFetchKey.current === key) {
+      console.log(`[WSSI] Skip fetch - same key: ${key}`);
+      return;
     }
-    loadDataDebounced(currentDay.current, currentResolution.current);
-  }, [loadDataDebounced]);
+
+    // Check cache first
+    if (dataCache.current[key]) {
+      console.log(`[WSSI] Using cached data for: ${key}`);
+      lastFetchKey.current = key;
+      updateMapData(dataCache.current[key]);
+      return;
+    }
+
+    // Abort any in-flight request
+    if (abortController.current) {
+      console.log(`[WSSI] Aborting previous fetch`);
+      abortController.current.abort();
+    }
+
+    // Create new abort controller
+    const controller = new AbortController();
+    abortController.current = controller;
+
+    const fetchData = async () => {
+      console.log(`[WSSI] Fetch start: ${key}`);
+      setLoading(true);
+      setError(null);
+
+      try {
+        const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
+          signal: controller.signal,
+        });
+
+        // Check if this request was aborted
+        if (controller.signal.aborted) {
+          console.log(`[WSSI] Fetch aborted: ${key}`);
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data: WSSIGeoJSON = await response.json();
+
+        // Check abort again after parsing
+        if (controller.signal.aborted) {
+          console.log(`[WSSI] Fetch aborted after parse: ${key}`);
+          return;
+        }
+
+        if (data.error) {
+          throw new Error(data.error);
+        }
+
+        // Extract metrics from headers
+        const featureCount = response.headers.get('X-WSSI-Features');
+        const vertexCount = response.headers.get('X-WSSI-Vertices');
+        const byteCount = response.headers.get('X-WSSI-Bytes');
+        const lastModified = response.headers.get('X-WSSI-Last-Modified');
+
+        console.log(`[WSSI] Fetch success: ${key}, ${featureCount}f, ${vertexCount}v, ${byteCount}b`);
+
+        // Cache the data
+        dataCache.current[key] = data;
+        lastFetchKey.current = key;
+
+        // Update state
+        updateMapData(data);
+        setMetrics({
+          features: parseInt(featureCount || '0', 10),
+          vertices: parseInt(vertexCount || '0', 10),
+          bytes: parseInt(byteCount || '0', 10),
+        });
+        if (lastModified) {
+          setLastUpdate(new Date(lastModified).toLocaleString());
+        }
+        setError(null);
+
+      } catch (err) {
+        // Don't set error if aborted
+        if (err instanceof Error && err.name === 'AbortError') {
+          console.log(`[WSSI] Fetch aborted (caught): ${key}`);
+          return;
+        }
+        console.error(`[WSSI] Fetch error: ${key}`, err);
+        setError(err instanceof Error ? err.message : 'Failed to load');
+      } finally {
+        // Only clear loading if this is still the current request
+        if (abortController.current === controller) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchData();
+
+    // Cleanup: abort on unmount or deps change
+    return () => {
+      controller.abort();
+    };
+  }, [mapLoaded, selectedDay, selectedRes, updateMapData]);
+
+  // Handle day change
+  const handleDayChange = useCallback((day: number) => {
+    console.log(`[WSSI] Day change: ${day}`);
+    setSelectedDay(day);
+  }, []);
+
+  // Handle manual refresh
+  const handleRefresh = useCallback(() => {
+    console.log(`[WSSI] Manual refresh`);
+    // Clear cache for current key and reset lastFetchKey to force refetch
+    const key = `${selectedDay}:${selectedRes}`;
+    delete dataCache.current[key];
+    lastFetchKey.current = null;
+    // Force re-render by updating a state
+    setSelectedDay(prev => prev); // This won't change value but will trigger effect
+  }, [selectedDay, selectedRes]);
+
+  // Force refetch by changing a trigger state
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  const handleRefreshClick = useCallback(() => {
+    console.log(`[WSSI] Refresh clicked`);
+    const key = `${selectedDay}:${selectedRes}`;
+    delete dataCache.current[key];
+    lastFetchKey.current = null;
+    setRefreshTrigger(prev => prev + 1);
+  }, [selectedDay, selectedRes]);
+
+  // Add refreshTrigger to the fetch effect dependencies
+  useEffect(() => {
+    if (!mapLoaded) return;
+    if (refreshTrigger === 0) return; // Skip initial mount
+
+    const key = `${selectedDay}:${selectedRes}`;
+    console.log(`[WSSI] Refresh trigger: ${key}`);
+
+    // Abort any in-flight request
+    if (abortController.current) {
+      abortController.current.abort();
+    }
+
+    const controller = new AbortController();
+    abortController.current = controller;
+
+    const fetchData = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
+          signal: controller.signal,
+        });
+
+        if (controller.signal.aborted) return;
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const data: WSSIGeoJSON = await response.json();
+        if (controller.signal.aborted) return;
+        if (data.error) throw new Error(data.error);
+
+        const featureCount = response.headers.get('X-WSSI-Features');
+        const vertexCount = response.headers.get('X-WSSI-Vertices');
+        const byteCount = response.headers.get('X-WSSI-Bytes');
+        const lastModified = response.headers.get('X-WSSI-Last-Modified');
+
+        dataCache.current[key] = data;
+        lastFetchKey.current = key;
+
+        updateMapData(data);
+        setMetrics({
+          features: parseInt(featureCount || '0', 10),
+          vertices: parseInt(vertexCount || '0', 10),
+          bytes: parseInt(byteCount || '0', 10),
+        });
+        if (lastModified) {
+          setLastUpdate(new Date(lastModified).toLocaleString());
+        }
+        setError(null);
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') return;
+        setError(err instanceof Error ? err.message : 'Failed to load');
+      } finally {
+        if (abortController.current === controller) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchData();
+    return () => controller.abort();
+  }, [refreshTrigger, mapLoaded, selectedDay, selectedRes, updateMapData]);
 
   return (
     <div className="h-screen bg-mv-bg-primary flex flex-col overflow-hidden">
@@ -361,7 +444,7 @@ export default function WSSIClient() {
               </span>
             )}
             <span className="text-xs text-cyan-400 font-mono hidden sm:inline">
-              {displayResolution}
+              {selectedRes}
             </span>
             {metrics && (
               <span className="text-xs text-mv-text-muted hidden lg:inline font-mono">
@@ -369,7 +452,7 @@ export default function WSSIClient() {
               </span>
             )}
             <button
-              onClick={handleRefresh}
+              onClick={handleRefreshClick}
               disabled={loading}
               className="p-1.5 rounded hover:bg-white/10 transition-colors disabled:opacity-50"
               title="Refresh data"
@@ -439,23 +522,37 @@ export default function WSSIClient() {
         <main className="flex-1 relative">
           <div ref={mapContainer} className="absolute inset-0" />
 
-          {/* Loading overlay */}
-          {(!mapLoaded || loading) && (
+          {/* Loading overlay - only show on initial load, not on refetch */}
+          {!mapLoaded && (
             <div className="absolute inset-0 flex items-center justify-center bg-mv-bg-primary/80 z-10">
               <div className="flex flex-col items-center gap-3">
                 <div className="w-10 h-10 rounded-full border-2 border-cyan-500/30 border-t-cyan-500 animate-spin" />
-                <span className="text-sm text-mv-text-muted">
-                  {loading ? 'Loading WSSI data...' : 'Loading map...'}
-                </span>
+                <span className="text-sm text-mv-text-muted">Loading map...</span>
               </div>
             </div>
           )}
 
-          {/* Error message */}
+          {/* Data loading indicator - small, non-blocking */}
+          {mapLoaded && loading && (
+            <div className="absolute top-4 left-4 z-10">
+              <div className="bg-mv-bg-secondary/90 backdrop-blur-sm px-3 py-2 rounded-lg border border-white/10 flex items-center gap-2">
+                <div className="w-4 h-4 rounded-full border-2 border-cyan-500/30 border-t-cyan-500 animate-spin" />
+                <span className="text-xs text-mv-text-muted">Loading data...</span>
+              </div>
+            </div>
+          )}
+
+          {/* Error message with retry */}
           {error && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
-              <div className="bg-red-500/20 backdrop-blur-sm text-red-400 px-4 py-2 rounded-lg border border-red-500/30 text-sm">
-                {error}
+              <div className="bg-red-500/20 backdrop-blur-sm text-red-400 px-4 py-2 rounded-lg border border-red-500/30 text-sm flex items-center gap-3">
+                <span>{error}</span>
+                <button
+                  onClick={handleRefreshClick}
+                  className="px-2 py-1 bg-red-500/30 hover:bg-red-500/50 rounded text-xs"
+                >
+                  Retry
+                </button>
               </div>
             </div>
           )}
