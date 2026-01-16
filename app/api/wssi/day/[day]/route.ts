@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import * as turf from '@turf/turf';
-import type { Feature, Polygon, MultiPolygon, FeatureCollection, Geometry } from 'geojson';
+import type { Feature, FeatureCollection } from 'geojson';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,8 +16,6 @@ const MAPSERVER_BASE = 'https://mapservices.weather.noaa.gov/vector/rest/service
 
 // WSSI categories in severity order (low to high)
 type WSSICategory = 'elevated' | 'minor' | 'moderate' | 'major' | 'extreme';
-
-const CATEGORY_ORDER: WSSICategory[] = ['elevated', 'minor', 'moderate', 'major', 'extreme'];
 
 // Map WSSI categories to display labels
 const WSSI_CATEGORY_LABELS: Record<WSSICategory, string> = {
@@ -56,16 +53,9 @@ const RISK_ORDER: Record<string, number> = {
   'High Risk': 5,
 };
 
-// Cache
-const wssiCache = new Map<string, { data: FeatureCollection; timestamp: number; lastModified: string; debug: DebugInfo }>();
+// Cache - simple raw data cache
+const wssiCache = new Map<string, { data: FeatureCollection; timestamp: number; lastModified: string }>();
 const CACHE_TTL = 5 * 60 * 1000;
-
-interface DebugInfo {
-  rawCounts: Record<string, number>;
-  bandedCounts: Record<string, number>;
-  unknownFeatures: number;
-  totalFeatures: number;
-}
 
 /**
  * Extract WSSI category from feature properties
@@ -95,185 +85,15 @@ function extractCategory(properties: Record<string, unknown>): WSSICategory | nu
     }
   }
 
-  // Log unknown and return null - DO NOT default to elevated
-  console.warn('Unknown WSSI category for properties:', JSON.stringify(properties));
   return null;
 }
 
-// Type alias for polygon features
-type PolygonFeature = Feature<Polygon | MultiPolygon>;
-
 /**
- * Chaikin smoothing algorithm - rounds corners while preserving shape
- * @param coords - Ring coordinates
- * @param iterations - Number of smoothing passes (2-3 recommended)
+ * Lightweight server-side processing:
+ * - Just categorize and add metadata
+ * - Heavy smoothing/banding done client-side
  */
-function chaikinSmooth(coords: number[][], iterations: number = 3): number[][] {
-  if (coords.length < 4) return coords;
-
-  let result = [...coords];
-
-  for (let iter = 0; iter < iterations; iter++) {
-    const smoothed: number[][] = [];
-
-    // Process all segments except the closing one
-    for (let i = 0; i < result.length - 1; i++) {
-      const p0 = result[i];
-      const p1 = result[i + 1];
-
-      // Q point: 75% toward p0, 25% toward p1
-      const q = [
-        0.75 * p0[0] + 0.25 * p1[0],
-        0.75 * p0[1] + 0.25 * p1[1],
-      ];
-
-      // R point: 25% toward p0, 75% toward p1
-      const r = [
-        0.25 * p0[0] + 0.75 * p1[0],
-        0.25 * p0[1] + 0.75 * p1[1],
-      ];
-
-      smoothed.push(q, r);
-    }
-
-    // Close the ring
-    if (smoothed.length > 0) {
-      smoothed.push([smoothed[0][0], smoothed[0][1]]);
-    }
-
-    result = smoothed;
-  }
-
-  return result;
-}
-
-/**
- * Apply Chaikin smoothing to all rings in a polygon
- */
-function smoothPolygonCoords(rings: number[][][], iterations: number = 3): number[][][] {
-  return rings.map(ring => chaikinSmooth(ring, iterations));
-}
-
-/**
- * Apply Chaikin smoothing to a GeoJSON geometry
- */
-function applyChaikinSmoothing(geometry: Geometry, iterations: number = 3): Geometry {
-  if (geometry.type === 'Polygon') {
-    return {
-      type: 'Polygon',
-      coordinates: smoothPolygonCoords(geometry.coordinates as number[][][], iterations),
-    };
-  } else if (geometry.type === 'MultiPolygon') {
-    return {
-      type: 'MultiPolygon',
-      coordinates: (geometry.coordinates as number[][][][]).map(polygon =>
-        smoothPolygonCoords(polygon, iterations)
-      ),
-    };
-  }
-  return geometry;
-}
-
-/**
- * Serverless-optimized smoothing pipeline:
- * 1. Simplification to remove grid stair-steps
- * 2. Chaikin smoothing (2 iterations) to round corners
- * 3. Final simplification to reduce point count
- *
- * Note: Buffer operations removed - too expensive for serverless
- */
-function smoothGeometryFull(feature: PolygonFeature): PolygonFeature | null {
-  try {
-    let current = feature;
-
-    // Step 1: Simplification to remove grid artifacts
-    try {
-      const simplified = turf.simplify(current, {
-        tolerance: 0.015, // ~1.5km at mid-latitudes
-        highQuality: false, // Faster for serverless
-      });
-      if (simplified && simplified.geometry) {
-        current = simplified as PolygonFeature;
-      }
-    } catch (e) {
-      console.log('[WSSI] Simplify failed, continuing with original');
-    }
-
-    // Step 2: Chaikin smoothing (2 iterations for rounded corners)
-    if (current.geometry) {
-      current = {
-        ...current,
-        geometry: applyChaikinSmoothing(current.geometry, 2) as Polygon | MultiPolygon,
-      };
-    }
-
-    // Step 3: Final simplification to reduce point count
-    try {
-      const finalSimplified = turf.simplify(current, {
-        tolerance: 0.008,
-        highQuality: false,
-      });
-      if (finalSimplified && finalSimplified.geometry) {
-        current = finalSimplified as PolygonFeature;
-      }
-    } catch {
-      // Keep current if simplify fails
-    }
-
-    return current;
-  } catch (err) {
-    console.error('[WSSI] Smoothing failed:', err);
-    return feature; // Return original on failure
-  }
-}
-
-/**
- * Union all features in an array into a single MultiPolygon
- */
-function unionFeatures(features: Feature[]): PolygonFeature | null {
-  if (features.length === 0) return null;
-  if (features.length === 1) return features[0] as PolygonFeature;
-
-  try {
-    let result = features[0] as PolygonFeature;
-    for (let i = 1; i < features.length; i++) {
-      // Turf v7 union takes a FeatureCollection
-      const fc = turf.featureCollection([result, features[i]]);
-      const unioned = turf.union(fc as Parameters<typeof turf.union>[0]);
-      if (unioned) {
-        result = unioned as PolygonFeature;
-      }
-    }
-    return result;
-  } catch (err) {
-    console.error('Error unioning features:', err);
-    // Fallback: just return the first feature
-    return features[0] as PolygonFeature;
-  }
-}
-
-/**
- * Subtract geometry B from geometry A
- */
-function subtractGeometry(a: PolygonFeature | null, b: PolygonFeature | null): PolygonFeature | null {
-  if (!a) return null;
-  if (!b) return a;
-
-  try {
-    // Turf v7 difference takes a FeatureCollection
-    const fc = turf.featureCollection([a, b]);
-    const result = turf.difference(fc as Parameters<typeof turf.difference>[0]);
-    return result as PolygonFeature | null;
-  } catch (err) {
-    console.error('Error subtracting geometry:', err);
-    return a;
-  }
-}
-
-/**
- * Process WSSI data into exclusive bands
- */
-async function processWSSIData(day: number): Promise<{ geojson: FeatureCollection; lastModified: string; debug: DebugInfo }> {
+async function fetchWSSIData(day: number): Promise<{ geojson: FeatureCollection; lastModified: string }> {
   const layerId = WSSI_LAYER_IDS[day];
   if (!layerId) {
     throw new Error(`Invalid day: ${day}`);
@@ -293,156 +113,42 @@ async function processWSSIData(day: number): Promise<{ geojson: FeatureCollectio
   const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
   const rawData = await response.json() as FeatureCollection;
 
-  const debug: DebugInfo = {
-    rawCounts: { elevated: 0, minor: 0, moderate: 0, major: 0, extreme: 0 },
-    bandedCounts: { elevated: 0, minor: 0, moderate: 0, major: 0, extreme: 0 },
-    unknownFeatures: 0,
-    totalFeatures: rawData.features?.length || 0,
-  };
-
   if (!rawData.features || rawData.features.length === 0) {
     return {
       geojson: { type: 'FeatureCollection', features: [] },
       lastModified,
-      debug,
     };
   }
 
-  // Step 1: Group features by category
-  const featuresByCategory: Record<WSSICategory, Feature[]> = {
-    elevated: [],
-    minor: [],
-    moderate: [],
-    major: [],
-    extreme: [],
-  };
+  // Just add metadata - don't do heavy processing server-side
+  const processedFeatures: Feature[] = [];
 
   for (const feature of rawData.features) {
     if (!feature.geometry) continue;
     if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') continue;
 
     const category = extractCategory((feature.properties || {}) as Record<string, unknown>);
+    if (category === null) continue;
 
-    if (category === null) {
-      debug.unknownFeatures++;
-      continue;
-    }
+    const riskLabel = WSSI_TO_RISK[category];
+    const originalCategory = WSSI_CATEGORY_LABELS[category];
+    const riskColor = RISK_COLORS[riskLabel];
+    const riskOrder = RISK_ORDER[riskLabel];
 
-    featuresByCategory[category].push(feature);
-    debug.rawCounts[category]++;
+    processedFeatures.push({
+      type: 'Feature',
+      geometry: feature.geometry,
+      properties: {
+        day,
+        category,
+        originalCategory,
+        riskLabel,
+        riskColor,
+        riskOrder,
+        validTime: lastModified,
+      },
+    });
   }
-
-  console.log(`[WSSI Day ${day}] Raw counts:`, debug.rawCounts, `Unknown: ${debug.unknownFeatures}`);
-
-  // Step 2: Union features within each category
-  const unionedByCategory: Record<WSSICategory, PolygonFeature | null> = {
-    elevated: unionFeatures(featuresByCategory.elevated),
-    minor: unionFeatures(featuresByCategory.minor),
-    moderate: unionFeatures(featuresByCategory.moderate),
-    major: unionFeatures(featuresByCategory.major),
-    extreme: unionFeatures(featuresByCategory.extreme),
-  };
-
-  // Step 3: Build exclusive bands (subtract higher severity from lower)
-  // B_Extreme = U_Extreme
-  // B_Major = U_Major minus B_Extreme
-  // B_Moderate = U_Moderate minus (B_Major ∪ B_Extreme)
-  // etc.
-
-  const bandExtreme = unionedByCategory.extreme;
-
-  const bandMajor = subtractGeometry(unionedByCategory.major, bandExtreme);
-
-  const majorAndExtreme = unionFeatures([bandMajor, bandExtreme].filter(Boolean) as Feature[]);
-  const bandModerate = subtractGeometry(unionedByCategory.moderate, majorAndExtreme);
-
-  const modMajExt = unionFeatures([bandModerate, bandMajor, bandExtreme].filter(Boolean) as Feature[]);
-  const bandMinor = subtractGeometry(unionedByCategory.minor, modMajExt);
-
-  const minModMajExt = unionFeatures([bandMinor, bandModerate, bandMajor, bandExtreme].filter(Boolean) as Feature[]);
-  const bandElevated = subtractGeometry(unionedByCategory.elevated, minModMajExt);
-
-  const exclusiveBands: Record<WSSICategory, PolygonFeature | null> = {
-    elevated: bandElevated,
-    minor: bandMinor,
-    moderate: bandModerate,
-    major: bandMajor,
-    extreme: bandExtreme,
-  };
-
-  // Step 4: Smooth and create final features
-  const processedFeatures: Feature[] = [];
-
-  for (const category of CATEGORY_ORDER) {
-    const band = exclusiveBands[category];
-    if (!band || !band.geometry) continue;
-
-    // Validate geometry before processing
-    const geom = band.geometry;
-    if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') {
-      console.log(`[WSSI] Skipping ${category} - invalid geometry type: ${(geom as Geometry).type}`);
-      continue;
-    }
-
-    // Check if geometry has valid area (skip empty/degenerate polygons)
-    try {
-      const area = turf.area(band);
-      if (area < 1000000) { // Less than 1 km² - skip degenerate
-        console.log(`[WSSI] Skipping ${category} - area too small: ${area / 1000000} km²`);
-        continue;
-      }
-    } catch {
-      console.log(`[WSSI] Skipping ${category} - could not calculate area`);
-      continue;
-    }
-
-    try {
-      // Apply full smoothing pipeline for organic, rounded shapes
-      // This includes: simplify -> Chaikin -> buffer out/in -> final Chaikin
-      const smoothed = smoothGeometryFull(band);
-
-      if (!smoothed || !smoothed.geometry) {
-        console.log(`[WSSI] Skipping ${category} - smoothing produced null geometry`);
-        continue;
-      }
-
-      // Validate smoothed geometry still has area
-      try {
-        const smoothedArea = turf.area(smoothed);
-        if (smoothedArea < 500000) { // Less than 0.5 km² after smoothing
-          console.log(`[WSSI] Skipping ${category} - smoothed area too small: ${smoothedArea / 1000000} km²`);
-          continue;
-        }
-      } catch {
-        // Continue if area check fails
-      }
-
-      const riskLabel = WSSI_TO_RISK[category];
-      const originalCategory = WSSI_CATEGORY_LABELS[category];
-      const riskColor = RISK_COLORS[riskLabel];
-      const riskOrder = RISK_ORDER[riskLabel];
-
-      processedFeatures.push({
-        type: 'Feature',
-        geometry: smoothed.geometry,
-        properties: {
-          day,
-          category,
-          originalCategory,
-          riskLabel,
-          riskColor,
-          riskOrder,
-          validTime: lastModified,
-        },
-      });
-
-      debug.bandedCounts[category] = 1;
-    } catch (err) {
-      console.error(`Error processing ${category} band:`, err);
-    }
-  }
-
-  console.log(`[WSSI Day ${day}] Banded counts:`, debug.bandedCounts);
 
   // Sort by risk order (lower severity first, so higher severity renders on top)
   processedFeatures.sort((a, b) =>
@@ -455,7 +161,6 @@ async function processWSSIData(day: number): Promise<{ geojson: FeatureCollectio
       features: processedFeatures,
     },
     lastModified,
-    debug,
   };
 }
 
@@ -473,18 +178,11 @@ export async function GET(
     );
   }
 
-  // Check for debug parameter
-  const showDebug = request.nextUrl.searchParams.get('debug') === 'true';
-
   // Check cache
   const cacheKey = `wssi-day-${day}`;
   const cached = wssiCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    const responseData = showDebug
-      ? { ...cached.data, _debug: cached.debug }
-      : cached.data;
-
-    return NextResponse.json(responseData, {
+    return NextResponse.json(cached.data, {
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'public, max-age=300',
@@ -494,21 +192,16 @@ export async function GET(
   }
 
   try {
-    const { geojson, lastModified, debug } = await processWSSIData(day);
+    const { geojson, lastModified } = await fetchWSSIData(day);
 
     // Update cache
     wssiCache.set(cacheKey, {
       data: geojson,
       timestamp: Date.now(),
       lastModified,
-      debug,
     });
 
-    const responseData = showDebug
-      ? { ...geojson, _debug: debug }
-      : geojson;
-
-    return NextResponse.json(responseData, {
+    return NextResponse.json(geojson, {
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'public, max-age=300',
@@ -516,7 +209,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    console.error('Error processing WSSI data:', error);
+    console.error('Error fetching WSSI data:', error);
 
     return NextResponse.json(
       {

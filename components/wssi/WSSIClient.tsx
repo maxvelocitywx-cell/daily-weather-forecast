@@ -4,27 +4,136 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { Snowflake, Calendar, Info, AlertTriangle, RefreshCw } from 'lucide-react';
+import * as turf from '@turf/turf';
+import type { Feature, Polygon, MultiPolygon, Position } from 'geojson';
 
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
 
-// Risk levels and their colors
+// Risk levels and their colors (in order of severity - low to high)
 const RISK_LEVELS = [
-  { label: 'Marginal Risk', wssiLabel: 'Winter Weather Area', color: '#60A5FA' },
-  { label: 'Slight Risk', wssiLabel: 'Minor Impacts', color: '#2563EB' },
-  { label: 'Enhanced Risk', wssiLabel: 'Moderate Impacts', color: '#7C3AED' },
-  { label: 'Moderate Risk', wssiLabel: 'Major Impacts', color: '#A21CAF' },
-  { label: 'High Risk', wssiLabel: 'Extreme Impacts', color: '#DC2626' },
+  { label: 'Marginal Risk', wssiLabel: 'Winter Weather Area', color: '#60A5FA', category: 'elevated' },
+  { label: 'Slight Risk', wssiLabel: 'Minor Impacts', color: '#2563EB', category: 'minor' },
+  { label: 'Enhanced Risk', wssiLabel: 'Moderate Impacts', color: '#7C3AED', category: 'moderate' },
+  { label: 'Moderate Risk', wssiLabel: 'Major Impacts', color: '#A21CAF', category: 'major' },
+  { label: 'High Risk', wssiLabel: 'Extreme Impacts', color: '#DC2626', category: 'extreme' },
 ];
+
+// Category order for banding (low to high severity)
+const CATEGORY_ORDER = ['elevated', 'minor', 'moderate', 'major', 'extreme'] as const;
+type WSSICategory = typeof CATEGORY_ORDER[number];
 
 // Available days
 const DAYS = [1, 2, 3];
+
+// Type alias for polygon features
+type PolygonFeature = Feature<Polygon | MultiPolygon>;
+
+// ============================================================================
+// EPSG:3857 (Web Mercator) Projection Functions
+// Required for accurate meter-based buffering
+// ============================================================================
+
+const EARTH_RADIUS = 6378137; // Earth radius in meters (WGS84)
+
+/**
+ * Convert lon/lat (EPSG:4326) to Web Mercator (EPSG:3857) meters
+ */
+function toWebMercator(lon: number, lat: number): [number, number] {
+  const x = lon * (Math.PI / 180) * EARTH_RADIUS;
+  const y = Math.log(Math.tan((90 + lat) * (Math.PI / 360))) * EARTH_RADIUS;
+  return [x, y];
+}
+
+/**
+ * Convert Web Mercator (EPSG:3857) meters to lon/lat (EPSG:4326)
+ */
+function fromWebMercator(x: number, y: number): [number, number] {
+  const lon = (x / EARTH_RADIUS) * (180 / Math.PI);
+  const lat = (Math.atan(Math.exp(y / EARTH_RADIUS)) * 360 / Math.PI) - 90;
+  return [lon, lat];
+}
+
+/**
+ * Project a ring of coordinates to Web Mercator
+ */
+function projectRingToMercator(ring: Position[]): Position[] {
+  return ring.map(coord => {
+    const [x, y] = toWebMercator(coord[0], coord[1]);
+    return [x, y];
+  });
+}
+
+/**
+ * Unproject a ring of coordinates from Web Mercator to WGS84
+ */
+function unprojectRingFromMercator(ring: Position[]): Position[] {
+  return ring.map(coord => {
+    const [lon, lat] = fromWebMercator(coord[0], coord[1]);
+    return [lon, lat];
+  });
+}
+
+/**
+ * Project a Polygon or MultiPolygon to Web Mercator (EPSG:3857)
+ */
+function projectToMercator(feature: PolygonFeature): PolygonFeature {
+  const geom = feature.geometry;
+
+  if (geom.type === 'Polygon') {
+    return {
+      ...feature,
+      geometry: {
+        type: 'Polygon',
+        coordinates: geom.coordinates.map(ring => projectRingToMercator(ring)),
+      },
+    };
+  } else {
+    return {
+      ...feature,
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: geom.coordinates.map(polygon =>
+          polygon.map(ring => projectRingToMercator(ring))
+        ),
+      },
+    };
+  }
+}
+
+/**
+ * Unproject a Polygon or MultiPolygon from Web Mercator to WGS84 (EPSG:4326)
+ */
+function unprojectFromMercator(feature: PolygonFeature): PolygonFeature {
+  const geom = feature.geometry;
+
+  if (geom.type === 'Polygon') {
+    return {
+      ...feature,
+      geometry: {
+        type: 'Polygon',
+        coordinates: geom.coordinates.map(ring => unprojectRingFromMercator(ring)),
+      },
+    };
+  } else {
+    return {
+      ...feature,
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: geom.coordinates.map(polygon =>
+          polygon.map(ring => unprojectRingFromMercator(ring))
+        ),
+      },
+    };
+  }
+}
 
 interface WSSIFeature {
   type: 'Feature';
   geometry: GeoJSON.Geometry;
   properties: {
     day: number;
+    category?: string;
     riskLabel: string;
     originalLabel: string;
     riskColor: string;
@@ -39,6 +148,436 @@ interface WSSIGeoJSON {
   error?: string;
 }
 
+// ============================================================================
+// Geometry Validation and Processing Functions
+// ============================================================================
+
+// Debug stats for geometry hygiene
+interface GeometryStats {
+  invalidFixed: number;
+  sliversRemoved: number;
+  totalProcessed: number;
+}
+
+const debugStats: GeometryStats = {
+  invalidFixed: 0,
+  sliversRemoved: 0,
+  totalProcessed: 0,
+};
+
+/**
+ * Make geometry valid using buffer(0) trick with Turf
+ * This fixes self-intersections, invalid rings, etc.
+ */
+function makeValidTurf(feature: PolygonFeature): PolygonFeature {
+  try {
+    // Try buffer(0) - the standard GIS trick for fixing invalid polygons
+    const fixed = turf.buffer(feature, 0, { units: 'meters' });
+    if (fixed?.geometry) {
+      debugStats.invalidFixed++;
+      return fixed as PolygonFeature;
+    }
+  } catch {
+    // buffer(0) failed, try tiny buffer out then in
+    try {
+      const buffOut = turf.buffer(feature, 0.001, { units: 'kilometers' });
+      if (buffOut?.geometry) {
+        const buffIn = turf.buffer(buffOut as PolygonFeature, -0.001, { units: 'kilometers' });
+        if (buffIn?.geometry) {
+          debugStats.invalidFixed++;
+          return buffIn as PolygonFeature;
+        }
+        return buffOut as PolygonFeature;
+      }
+    } catch {
+      // Return original if all fixes fail
+    }
+  }
+  return feature;
+}
+
+/**
+ * Remove small polygon slivers/artifacts from a feature
+ * Works on projected coordinates (meters)
+ * @param feature - Polygon feature (in meters)
+ * @param minAreaM2 - Minimum area in square meters (default 5 km²)
+ */
+function removeSliversFromFeature(feature: PolygonFeature, minAreaM2: number = 5000000): PolygonFeature | null {
+  const geom = feature.geometry;
+
+  if (geom.type === 'Polygon') {
+    // Calculate area - for projected coords, this gives m²
+    const coords = geom.coordinates[0];
+    const area = Math.abs(polygonArea(coords));
+    if (area < minAreaM2) {
+      debugStats.sliversRemoved++;
+      return null;
+    }
+    return feature;
+  }
+
+  if (geom.type === 'MultiPolygon') {
+    const validPolygons: number[][][][] = [];
+    for (const polygon of geom.coordinates) {
+      const coords = polygon[0];
+      const area = Math.abs(polygonArea(coords));
+      if (area >= minAreaM2) {
+        validPolygons.push(polygon);
+      } else {
+        debugStats.sliversRemoved++;
+      }
+    }
+
+    if (validPolygons.length === 0) return null;
+    if (validPolygons.length === 1) {
+      return {
+        ...feature,
+        geometry: { type: 'Polygon', coordinates: validPolygons[0] },
+      };
+    }
+    return {
+      ...feature,
+      geometry: { type: 'MultiPolygon', coordinates: validPolygons },
+    };
+  }
+
+  return feature;
+}
+
+/**
+ * Calculate polygon area using shoelace formula
+ * Works on any coordinate system (returns area in same units squared)
+ */
+function polygonArea(coords: number[][]): number {
+  let area = 0;
+  const n = coords.length;
+  for (let i = 0; i < n - 1; i++) {
+    area += coords[i][0] * coords[i + 1][1];
+    area -= coords[i + 1][0] * coords[i][1];
+  }
+  return area / 2;
+}
+
+// ============================================================================
+// Geometry Processing Functions (Turf-based)
+// ============================================================================
+
+/**
+ * Make a GeoJSON feature valid using Turf buffer(0)
+ */
+function makeValid(feature: PolygonFeature): PolygonFeature {
+  return makeValidTurf(feature);
+}
+
+/**
+ * Union all features into a single polygon with validation
+ */
+function unionFeatures(features: Feature[]): PolygonFeature | null {
+  if (features.length === 0) return null;
+
+  try {
+    // Validate all input geometries first
+    const validFeatures = features.map(f => makeValid(f as PolygonFeature));
+
+    if (validFeatures.length === 1) {
+      return validFeatures[0];
+    }
+
+    // Use Turf for union
+    let result = validFeatures[0];
+
+    for (let i = 1; i < validFeatures.length; i++) {
+      try {
+        const fc = turf.featureCollection([result, validFeatures[i]]);
+        const unioned = turf.union(fc as Parameters<typeof turf.union>[0]);
+        if (unioned) {
+          result = makeValid(unioned as PolygonFeature);
+        }
+      } catch {
+        // Skip this feature if union fails
+      }
+    }
+
+    return result;
+  } catch (e) {
+    console.warn('[WSSI] unionFeatures failed:', e);
+  }
+
+  // Fallback to first feature
+  return features.length > 0 ? makeValid(features[0] as PolygonFeature) : null;
+}
+
+/**
+ * Subtract geometry B from geometry A using Turf
+ */
+function subtractGeometry(a: PolygonFeature | null, b: PolygonFeature | null): PolygonFeature | null {
+  if (!a) return null;
+  if (!b) return a;
+
+  try {
+    const validA = makeValid(a);
+    const validB = makeValid(b);
+
+    const fc = turf.featureCollection([validA, validB]);
+    const result = turf.difference(fc as Parameters<typeof turf.difference>[0]);
+
+    if (result) {
+      return makeValid(result as PolygonFeature);
+    }
+  } catch (e) {
+    console.warn('[WSSI] subtractGeometry failed:', e);
+  }
+
+  return a;
+}
+
+/**
+ * Morphological smoothing using Turf in projected coordinates
+ *
+ * Pipeline:
+ * 1. Make geometry valid
+ * 2. Project to EPSG:3857 (meters)
+ * 3. Buffer OUT by distance (expands and rounds corners)
+ * 4. Buffer IN by same distance (contracts, keeps rounded edges)
+ * 5. Optional refinement pass
+ * 6. Remove slivers
+ * 7. Unproject back to EPSG:4326
+ * 8. Light simplification
+ */
+function morphologicalSmooth(
+  feature: PolygonFeature,
+  primaryBuffer: number = 30000,
+  refinementBuffer: number = 12000
+): PolygonFeature | null {
+  try {
+    debugStats.totalProcessed++;
+
+    // Step 1: Make geometry valid first (in WGS84)
+    let current = makeValid(feature);
+
+    // Step 2: Project to Web Mercator for meter-based operations
+    current = projectToMercator(current);
+
+    // Step 3: Primary morphological smoothing - buffer OUT then IN
+    // Convert meters to kilometers for Turf (which works in km when coords are degrees,
+    // but since we projected to meters, we use 'meters' unit)
+    try {
+      // Buffer OUT (expand) - this rounds all corners
+      const bufferedOut = turf.buffer(current, primaryBuffer / 1000, {
+        units: 'kilometers',
+        steps: 64 // High resolution for smooth curves
+      });
+
+      if (bufferedOut?.geometry) {
+        // Buffer IN (contract) by same amount
+        const bufferedIn = turf.buffer(bufferedOut as PolygonFeature, -primaryBuffer / 1000, {
+          units: 'kilometers',
+          steps: 64
+        });
+
+        if (bufferedIn?.geometry) {
+          current = bufferedIn as PolygonFeature;
+        }
+      }
+    } catch (e) {
+      console.warn('[WSSI] Primary buffer failed:', e);
+    }
+
+    // Step 4: Refinement pass with smaller buffer
+    if (refinementBuffer > 0) {
+      try {
+        const refOut = turf.buffer(current, refinementBuffer / 1000, {
+          units: 'kilometers',
+          steps: 48
+        });
+        if (refOut?.geometry) {
+          const refIn = turf.buffer(refOut as PolygonFeature, -refinementBuffer / 1000, {
+            units: 'kilometers',
+            steps: 48
+          });
+          if (refIn?.geometry) {
+            current = refIn as PolygonFeature;
+          }
+        }
+      } catch {
+        // Refinement is optional
+      }
+    }
+
+    // Step 5: Remove slivers (in meters^2)
+    const withoutSlivers = removeSliversFromFeature(current, 5000000); // 5 km² minimum
+    if (!withoutSlivers) {
+      console.warn('[WSSI] Geometry is empty after sliver removal');
+      return null;
+    }
+    current = withoutSlivers;
+
+    // Step 6: Unproject back to WGS84
+    current = unprojectFromMercator(current);
+
+    // Step 7: Light simplification (preserve curves)
+    try {
+      const simplified = turf.simplify(current, {
+        tolerance: 0.002,
+        highQuality: true,
+      });
+      if (simplified?.geometry) {
+        current = simplified as PolygonFeature;
+      }
+    } catch {
+      // Keep unsimplified
+    }
+
+    return current;
+  } catch (e) {
+    console.error('[WSSI] Morphological smoothing failed:', e);
+    return feature;
+  }
+}
+
+/**
+ * Process raw WSSI data into exclusive, smoothed bands
+ * Uses morphological smoothing for SPC/WPC-style rounded boundaries
+ */
+function processWSSIData(rawData: WSSIGeoJSON): WSSIGeoJSON {
+  if (!rawData.features || rawData.features.length === 0) {
+    return rawData;
+  }
+
+  // Reset debug stats
+  debugStats.invalidFixed = 0;
+  debugStats.sliversRemoved = 0;
+  debugStats.totalProcessed = 0;
+
+  console.log('[WSSI] ========================================');
+  console.log('[WSSI] Processing', rawData.features.length, 'raw features');
+
+  // Group features by category
+  const featuresByCategory: Record<WSSICategory, Feature[]> = {
+    elevated: [],
+    minor: [],
+    moderate: [],
+    major: [],
+    extreme: [],
+  };
+
+  for (const feature of rawData.features) {
+    const category = feature.properties?.category as WSSICategory;
+    if (category && featuresByCategory[category]) {
+      featuresByCategory[category].push(feature as Feature);
+    }
+  }
+
+  console.log('[WSSI] Features by category:', Object.fromEntries(
+    Object.entries(featuresByCategory).map(([k, v]) => [k, v.length])
+  ));
+
+  // Union features within each category (dissolve to single MultiPolygon)
+  const unionedByCategory: Record<WSSICategory, PolygonFeature | null> = {
+    elevated: unionFeatures(featuresByCategory.elevated),
+    minor: unionFeatures(featuresByCategory.minor),
+    moderate: unionFeatures(featuresByCategory.moderate),
+    major: unionFeatures(featuresByCategory.major),
+    extreme: unionFeatures(featuresByCategory.extreme),
+  };
+
+  // Build exclusive bands (subtract higher severity from lower)
+  // This ensures no overlap between risk levels
+  const bandExtreme = unionedByCategory.extreme;
+  const bandMajor = subtractGeometry(unionedByCategory.major, bandExtreme);
+  const majorAndExtreme = unionFeatures([bandMajor, bandExtreme].filter(Boolean) as Feature[]);
+  const bandModerate = subtractGeometry(unionedByCategory.moderate, majorAndExtreme);
+  const modMajExt = unionFeatures([bandModerate, bandMajor, bandExtreme].filter(Boolean) as Feature[]);
+  const bandMinor = subtractGeometry(unionedByCategory.minor, modMajExt);
+  const minModMajExt = unionFeatures([bandMinor, bandModerate, bandMajor, bandExtreme].filter(Boolean) as Feature[]);
+  const bandElevated = subtractGeometry(unionedByCategory.elevated, minModMajExt);
+
+  const exclusiveBands: Record<WSSICategory, PolygonFeature | null> = {
+    elevated: bandElevated,
+    minor: bandMinor,
+    moderate: bandModerate,
+    major: bandMajor,
+    extreme: bandExtreme,
+  };
+
+  // Apply morphological smoothing and create final features
+  const processedFeatures: WSSIFeature[] = [];
+
+  for (const category of CATEGORY_ORDER) {
+    const band = exclusiveBands[category];
+    if (!band?.geometry) continue;
+
+    // Check minimum area (skip tiny fragments)
+    try {
+      const area = turf.area(band);
+      if (area < 1000000) {
+        console.log(`[WSSI] Skipping ${category} - area too small: ${(area / 1000000).toFixed(2)} km²`);
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    // Apply morphological smoothing with meter-based buffers
+    // Primary: 30km out/in for major rounding
+    // Refinement: 12km out/in for extra smoothness
+    console.log(`[WSSI] Smoothing ${category} band...`);
+    const smoothed = morphologicalSmooth(band, 30000, 12000);
+
+    if (!smoothed?.geometry) {
+      console.log(`[WSSI] Smoothing failed for ${category}, using original`);
+      continue;
+    }
+
+    // Verify smoothed geometry still has area
+    try {
+      const smoothedArea = turf.area(smoothed);
+      if (smoothedArea < 500000) {
+        console.log(`[WSSI] Smoothed ${category} too small: ${(smoothedArea / 1000000).toFixed(2)} km²`);
+        continue;
+      }
+    } catch {
+      // Continue if area check fails
+    }
+
+    // Get risk info from RISK_LEVELS
+    const riskInfo = RISK_LEVELS.find(r => r.category === category);
+    if (!riskInfo) continue;
+
+    processedFeatures.push({
+      type: 'Feature',
+      geometry: smoothed.geometry,
+      properties: {
+        day: rawData.features[0]?.properties?.day || 1,
+        riskLabel: riskInfo.label,
+        originalLabel: riskInfo.wssiLabel,
+        riskColor: riskInfo.color,
+        riskOrder: CATEGORY_ORDER.indexOf(category) + 1,
+        validTime: rawData.features[0]?.properties?.validTime || new Date().toISOString(),
+      },
+    });
+
+    console.log(`[WSSI] Added ${category} band`);
+  }
+
+  // Sort by risk order (lower severity first, so higher severity renders on top)
+  processedFeatures.sort((a, b) => (a.properties.riskOrder || 0) - (b.properties.riskOrder || 0));
+
+  // Final debug summary
+  console.log('[WSSI] ========================================');
+  console.log('[WSSI] GEOMETRY HYGIENE SUMMARY:');
+  console.log(`[WSSI]   Invalid geometries fixed: ${debugStats.invalidFixed}`);
+  console.log(`[WSSI]   Slivers removed: ${debugStats.sliversRemoved}`);
+  console.log(`[WSSI]   Total geometries processed: ${debugStats.totalProcessed}`);
+  console.log(`[WSSI]   Final bands: ${processedFeatures.length}`);
+  console.log('[WSSI] ========================================');
+
+  return {
+    type: 'FeatureCollection',
+    features: processedFeatures,
+  };
+}
+
 export default function WSSIClient() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -48,6 +587,7 @@ export default function WSSIClient() {
   const [selectedDay, setSelectedDay] = useState(1);
   const [wssiData, setWssiData] = useState<Record<number, WSSIGeoJSON>>({});
   const [loading, setLoading] = useState<Record<number, boolean>>({});
+  const [processing, setProcessing] = useState<Record<number, boolean>>({});
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,13 +611,31 @@ export default function WSSIClient() {
         throw new Error(`Failed to fetch WSSI data: ${response.status}`);
       }
 
-      const data: WSSIGeoJSON = await response.json();
+      const rawData: WSSIGeoJSON = await response.json();
 
-      if (data.error) {
-        throw new Error(data.error);
+      if (rawData.error) {
+        throw new Error(rawData.error);
       }
 
-      setWssiData(prev => ({ ...prev, [day]: data }));
+      // Set loading to false, switch to processing state
+      setLoading(prev => ({ ...prev, [day]: false }));
+      setProcessing(prev => ({ ...prev, [day]: true }));
+
+      // Process data client-side (union, band, smooth)
+      // Use setTimeout to allow UI to update before heavy processing
+      await new Promise<void>(resolve => {
+        setTimeout(() => {
+          try {
+            const processedData = processWSSIData(rawData);
+            setWssiData(prev => ({ ...prev, [day]: processedData }));
+          } catch (err) {
+            console.error('Error processing WSSI data:', err);
+            // Fall back to raw data if processing fails
+            setWssiData(prev => ({ ...prev, [day]: rawData }));
+          }
+          resolve();
+        }, 10);
+      });
 
       if (lastModified) {
         setLastUpdate(new Date(lastModified).toLocaleString());
@@ -88,6 +646,7 @@ export default function WSSIClient() {
     } finally {
       loadingRef.current[day] = false;
       setLoading(prev => ({ ...prev, [day]: false }));
+      setProcessing(prev => ({ ...prev, [day]: false }));
     }
   }, []);
 
@@ -295,6 +854,8 @@ export default function WSSIClient() {
   const currentDayData = wssiData[selectedDay];
   const hasData = currentDayData && currentDayData.features.length > 0;
   const isLoading = loading[selectedDay];
+  const isProcessing = processing[selectedDay];
+  const isBusy = isLoading || isProcessing;
 
   return (
     <div className="h-screen bg-mv-bg-primary flex flex-col overflow-hidden">
@@ -318,11 +879,11 @@ export default function WSSIClient() {
             )}
             <button
               onClick={handleRefresh}
-              disabled={isLoading}
+              disabled={isBusy}
               className="p-1.5 rounded hover:bg-white/10 transition-colors disabled:opacity-50"
               title="Refresh data"
             >
-              <RefreshCw size={16} className={`text-mv-text-muted ${isLoading ? 'animate-spin' : ''}`} />
+              <RefreshCw size={16} className={`text-mv-text-muted ${isBusy ? 'animate-spin' : ''}`} />
             </button>
           </div>
         </div>
@@ -399,19 +960,19 @@ export default function WSSIClient() {
           <div ref={mapContainer} className="absolute inset-0" />
 
           {/* Loading overlay */}
-          {(!mapLoaded || isLoading) && (
+          {(!mapLoaded || isBusy) && (
             <div className="absolute inset-0 flex items-center justify-center bg-mv-bg-primary/80 z-10">
               <div className="flex flex-col items-center gap-3">
                 <div className="w-10 h-10 rounded-full border-2 border-cyan-500/30 border-t-cyan-500 animate-spin" />
                 <span className="text-sm text-mv-text-muted">
-                  {isLoading ? 'Loading WSSI data...' : 'Loading map...'}
+                  {isLoading ? 'Fetching WSSI data...' : isProcessing ? 'Processing polygons...' : 'Loading map...'}
                 </span>
               </div>
             </div>
           )}
 
           {/* No data message */}
-          {mapLoaded && !isLoading && !hasData && !error && (
+          {mapLoaded && !isBusy && !hasData && !error && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
               <div className="bg-mv-bg-secondary/95 backdrop-blur-sm text-mv-text-muted px-4 py-2 rounded-lg border border-white/10 text-sm">
                 No winter storm impacts forecast for Day {selectedDay}
