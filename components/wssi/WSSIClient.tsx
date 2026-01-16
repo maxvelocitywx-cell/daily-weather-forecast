@@ -332,47 +332,42 @@ function subtractGeometry(a: PolygonFeature | null, b: PolygonFeature | null): P
 }
 
 /**
- * Morphological smoothing using Turf in projected coordinates
+ * Morphological smoothing using Turf buffer operations in WGS84
  *
  * Pipeline:
  * 1. Make geometry valid
- * 2. Project to EPSG:3857 (meters)
- * 3. Buffer OUT by distance (expands and rounds corners)
- * 4. Buffer IN by same distance (contracts, keeps rounded edges)
- * 5. Optional refinement pass
- * 6. Remove slivers
- * 7. Unproject back to EPSG:4326
- * 8. Light simplification
+ * 2. Buffer OUT by distance (expands and rounds corners)
+ * 3. Buffer IN by same distance (contracts, keeps rounded edges)
+ * 4. Light simplification
+ *
+ * Note: Turf works in WGS84 with kilometer units - it handles the
+ * spherical math internally. We use ~25km for primary smoothing.
  */
 function morphologicalSmooth(
   feature: PolygonFeature,
-  primaryBuffer: number = 30000,
-  refinementBuffer: number = 12000
+  primaryBufferKm: number = 25,
+  refinementBufferKm: number = 10
 ): PolygonFeature | null {
   try {
     debugStats.totalProcessed++;
 
-    // Step 1: Make geometry valid first (in WGS84)
+    // Step 1: Make geometry valid first
     let current = makeValid(feature);
 
-    // Step 2: Project to Web Mercator for meter-based operations
-    current = projectToMercator(current);
-
-    // Step 3: Primary morphological smoothing - buffer OUT then IN
-    // Convert meters to kilometers for Turf (which works in km when coords are degrees,
-    // but since we projected to meters, we use 'meters' unit)
+    // Step 2: Primary morphological smoothing - buffer OUT then IN
+    // This rounds corners and smooths jagged edges
     try {
       // Buffer OUT (expand) - this rounds all corners
-      const bufferedOut = turf.buffer(current, primaryBuffer / 1000, {
+      const bufferedOut = turf.buffer(current, primaryBufferKm, {
         units: 'kilometers',
-        steps: 64 // High resolution for smooth curves
+        steps: 32 // Good resolution for smooth curves
       });
 
       if (bufferedOut?.geometry) {
         // Buffer IN (contract) by same amount
-        const bufferedIn = turf.buffer(bufferedOut as PolygonFeature, -primaryBuffer / 1000, {
+        const bufferedIn = turf.buffer(bufferedOut as PolygonFeature, -primaryBufferKm, {
           units: 'kilometers',
-          steps: 64
+          steps: 32
         });
 
         if (bufferedIn?.geometry) {
@@ -383,17 +378,17 @@ function morphologicalSmooth(
       console.warn('[WSSI] Primary buffer failed:', e);
     }
 
-    // Step 4: Refinement pass with smaller buffer
-    if (refinementBuffer > 0) {
+    // Step 3: Refinement pass with smaller buffer (optional)
+    if (refinementBufferKm > 0) {
       try {
-        const refOut = turf.buffer(current, refinementBuffer / 1000, {
+        const refOut = turf.buffer(current, refinementBufferKm, {
           units: 'kilometers',
-          steps: 48
+          steps: 24
         });
         if (refOut?.geometry) {
-          const refIn = turf.buffer(refOut as PolygonFeature, -refinementBuffer / 1000, {
+          const refIn = turf.buffer(refOut as PolygonFeature, -refinementBufferKm, {
             units: 'kilometers',
-            steps: 48
+            steps: 24
           });
           if (refIn?.geometry) {
             current = refIn as PolygonFeature;
@@ -404,21 +399,10 @@ function morphologicalSmooth(
       }
     }
 
-    // Step 5: Remove slivers (in meters^2)
-    const withoutSlivers = removeSliversFromFeature(current, 5000000); // 5 km² minimum
-    if (!withoutSlivers) {
-      console.warn('[WSSI] Geometry is empty after sliver removal');
-      return null;
-    }
-    current = withoutSlivers;
-
-    // Step 6: Unproject back to WGS84
-    current = unprojectFromMercator(current);
-
-    // Step 7: Light simplification (preserve curves)
+    // Step 4: Light simplification (preserve curves)
     try {
       const simplified = turf.simplify(current, {
-        tolerance: 0.002,
+        tolerance: 0.005, // Slightly more aggressive to reduce vertices
         highQuality: true,
       });
       if (simplified?.geometry) {
@@ -518,11 +502,11 @@ function processWSSIData(rawData: WSSIGeoJSON): WSSIGeoJSON {
       continue;
     }
 
-    // Apply morphological smoothing with meter-based buffers
-    // Primary: 30km out/in for major rounding
-    // Refinement: 12km out/in for extra smoothness
+    // Apply morphological smoothing with km-based buffers
+    // Primary: 25km out/in for major rounding
+    // Refinement: 10km out/in for extra smoothness
     console.log(`[WSSI] Smoothing ${category} band...`);
-    const smoothed = morphologicalSmooth(band, 30000, 12000);
+    const smoothed = morphologicalSmooth(band, 25, 10);
 
     if (!smoothed?.geometry) {
       console.log(`[WSSI] Smoothing failed for ${category}, using original`);
