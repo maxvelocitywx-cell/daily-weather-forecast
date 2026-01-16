@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import type { Feature, FeatureCollection } from 'geojson';
+import * as turf from '@turf/turf';
+import type { Feature, FeatureCollection, Polygon, MultiPolygon, Position } from 'geojson';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const revalidate = 300; // 5 minute cache
+export const maxDuration = 60;
 
 // ArcGIS MapServer layer IDs for Overall Impact
 const WSSI_LAYER_IDS: Record<number, number> = {
@@ -16,6 +17,7 @@ const MAPSERVER_BASE = 'https://mapservices.weather.noaa.gov/vector/rest/service
 
 // WSSI categories in severity order (low to high)
 type WSSICategory = 'elevated' | 'minor' | 'moderate' | 'major' | 'extreme';
+const CATEGORY_ORDER: WSSICategory[] = ['elevated', 'minor', 'moderate', 'major', 'extreme'];
 
 // Map WSSI categories to display labels
 const WSSI_CATEGORY_LABELS: Record<WSSICategory, string> = {
@@ -53,30 +55,55 @@ const RISK_ORDER: Record<string, number> = {
   'High Risk': 5,
 };
 
-// Cache - simple raw data cache
-const wssiCache = new Map<string, { data: FeatureCollection; timestamp: number; lastModified: string }>();
-const CACHE_TTL = 5 * 60 * 1000;
+// Simplification tolerances (in degrees, ~111km per degree at equator)
+// overview: ~10km tolerance, detail: ~2km tolerance
+const SIMPLIFY_TOLERANCE = {
+  overview: 0.1,   // ~11km - aggressive for national view
+  detail: 0.02,    // ~2.2km - lighter for zoomed view
+};
+
+// Minimum area thresholds (in square meters)
+const MIN_AREA = {
+  overview: 100_000_000, // 100 km² - drop small islands
+  detail: 25_000_000,    // 25 km²
+};
+
+// Buffer for smoothing (in km) - small to avoid huge polygon bloat
+const SMOOTH_BUFFER_KM = 8;
+
+// Cache with processed results
+interface CacheEntry {
+  overview: FeatureCollection;
+  detail: FeatureCollection;
+  timestamp: number;
+  lastModified: string;
+  metrics: {
+    featureCount: number;
+    vertexCount: number;
+    payloadBytes: number;
+  };
+}
+const wssiCache = new Map<string, CacheEntry>();
+const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+type PolygonFeature = Feature<Polygon | MultiPolygon>;
 
 /**
  * Extract WSSI category from feature properties
- * Returns null if category cannot be determined (feature will be omitted)
  */
 function extractCategory(properties: Record<string, unknown>): WSSICategory | null {
-  // ArcGIS MapServer uses 'impact' field for the category
   const possibleProps = ['impact', 'idp_wssilabel', 'label', 'Label', 'LABEL', 'name', 'Name'];
 
   for (const prop of possibleProps) {
     if (properties[prop]) {
       const value = String(properties[prop]).toLowerCase().trim();
 
-      // Check for exact matches first
       if (value === 'extreme' || value === 'extreme impacts') return 'extreme';
       if (value === 'major' || value === 'major impacts') return 'major';
       if (value === 'moderate' || value === 'moderate impacts') return 'moderate';
       if (value === 'minor' || value === 'minor impacts') return 'minor';
       if (value === 'elevated' || value === 'winter weather area') return 'elevated';
 
-      // Check for partial matches
       if (value.includes('extreme')) return 'extreme';
       if (value.includes('major')) return 'major';
       if (value.includes('moderate')) return 'moderate';
@@ -89,17 +116,268 @@ function extractCategory(properties: Record<string, unknown>): WSSICategory | nu
 }
 
 /**
- * Lightweight server-side processing:
- * - Just categorize and add metadata
- * - Heavy smoothing/banding done client-side
+ * Count vertices in a feature
  */
-async function fetchWSSIData(day: number): Promise<{ geojson: FeatureCollection; lastModified: string }> {
-  const layerId = WSSI_LAYER_IDS[day];
-  if (!layerId) {
-    throw new Error(`Invalid day: ${day}`);
+function countVertices(feature: PolygonFeature): number {
+  const geom = feature.geometry;
+  if (geom.type === 'Polygon') {
+    return geom.coordinates.reduce((sum, ring) => sum + ring.length, 0);
+  } else if (geom.type === 'MultiPolygon') {
+    return geom.coordinates.reduce((sum, poly) =>
+      sum + poly.reduce((s, ring) => s + ring.length, 0), 0);
+  }
+  return 0;
+}
+
+/**
+ * Remove small polygon fragments from a MultiPolygon
+ */
+function removeSmallFragments(feature: PolygonFeature, minAreaM2: number): PolygonFeature | null {
+  const geom = feature.geometry;
+
+  if (geom.type === 'Polygon') {
+    try {
+      const area = turf.area(feature);
+      if (area < minAreaM2) return null;
+    } catch {
+      // Keep if area calc fails
+    }
+    return feature;
   }
 
-  // Fetch from ArcGIS MapServer
+  if (geom.type === 'MultiPolygon') {
+    const validPolygons: Position[][][] = [];
+
+    for (const polygon of geom.coordinates) {
+      try {
+        const polyFeature = turf.polygon(polygon);
+        const area = turf.area(polyFeature);
+        if (area >= minAreaM2) {
+          validPolygons.push(polygon);
+        }
+      } catch {
+        // Skip invalid polygons
+      }
+    }
+
+    if (validPolygons.length === 0) return null;
+    if (validPolygons.length === 1) {
+      return {
+        ...feature,
+        geometry: { type: 'Polygon', coordinates: validPolygons[0] },
+      };
+    }
+    return {
+      ...feature,
+      geometry: { type: 'MultiPolygon', coordinates: validPolygons },
+    };
+  }
+
+  return feature;
+}
+
+/**
+ * Safe union of features with error handling
+ */
+function safeUnion(features: PolygonFeature[]): PolygonFeature | null {
+  if (features.length === 0) return null;
+  if (features.length === 1) return features[0];
+
+  try {
+    let result = features[0];
+
+    for (let i = 1; i < features.length; i++) {
+      try {
+        const fc = turf.featureCollection([result, features[i]]);
+        const unioned = turf.union(fc as Parameters<typeof turf.union>[0]);
+        if (unioned) {
+          result = unioned as PolygonFeature;
+        }
+      } catch {
+        // Skip failed unions
+      }
+    }
+
+    return result;
+  } catch {
+    return features[0];
+  }
+}
+
+/**
+ * Safe difference of features
+ */
+function safeDifference(a: PolygonFeature | null, b: PolygonFeature | null): PolygonFeature | null {
+  if (!a) return null;
+  if (!b) return a;
+
+  try {
+    const fc = turf.featureCollection([a, b]);
+    const result = turf.difference(fc as Parameters<typeof turf.difference>[0]);
+    return result as PolygonFeature | null;
+  } catch {
+    return a;
+  }
+}
+
+/**
+ * Light morphological smoothing - buffer out then in
+ */
+function smoothPolygon(feature: PolygonFeature, bufferKm: number): PolygonFeature | null {
+  try {
+    const bufferedOut = turf.buffer(feature, bufferKm, { units: 'kilometers', steps: 8 });
+    if (!bufferedOut?.geometry) return feature;
+
+    const bufferedIn = turf.buffer(bufferedOut as PolygonFeature, -bufferKm, { units: 'kilometers', steps: 8 });
+    if (!bufferedIn?.geometry) return feature;
+
+    return bufferedIn as PolygonFeature;
+  } catch {
+    return feature;
+  }
+}
+
+/**
+ * Process raw WSSI data into dissolved, simplified exclusive bands
+ */
+function processWSSIData(
+  rawFeatures: Feature[],
+  day: number,
+  resolution: 'overview' | 'detail',
+  lastModified: string
+): { geojson: FeatureCollection; metrics: { featureCount: number; vertexCount: number } } {
+
+  const tolerance = SIMPLIFY_TOLERANCE[resolution];
+  const minArea = MIN_AREA[resolution];
+
+  // Group features by category
+  const featuresByCategory: Record<WSSICategory, PolygonFeature[]> = {
+    elevated: [],
+    minor: [],
+    moderate: [],
+    major: [],
+    extreme: [],
+  };
+
+  for (const feature of rawFeatures) {
+    if (!feature.geometry) continue;
+    if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') continue;
+
+    const category = extractCategory((feature.properties || {}) as Record<string, unknown>);
+    if (!category) continue;
+
+    featuresByCategory[category].push(feature as PolygonFeature);
+  }
+
+  // Union features within each category (dissolve)
+  const unionedByCategory: Record<WSSICategory, PolygonFeature | null> = {
+    elevated: safeUnion(featuresByCategory.elevated),
+    minor: safeUnion(featuresByCategory.minor),
+    moderate: safeUnion(featuresByCategory.moderate),
+    major: safeUnion(featuresByCategory.major),
+    extreme: safeUnion(featuresByCategory.extreme),
+  };
+
+  // Build exclusive bands (subtract higher severity from lower)
+  const bandExtreme = unionedByCategory.extreme;
+  const bandMajor = safeDifference(unionedByCategory.major, bandExtreme);
+  const majorAndExtreme = safeUnion([bandMajor, bandExtreme].filter(Boolean) as PolygonFeature[]);
+  const bandModerate = safeDifference(unionedByCategory.moderate, majorAndExtreme);
+  const modMajExt = safeUnion([bandModerate, bandMajor, bandExtreme].filter(Boolean) as PolygonFeature[]);
+  const bandMinor = safeDifference(unionedByCategory.minor, modMajExt);
+  const minModMajExt = safeUnion([bandMinor, bandModerate, bandMajor, bandExtreme].filter(Boolean) as PolygonFeature[]);
+  const bandElevated = safeDifference(unionedByCategory.elevated, minModMajExt);
+
+  const exclusiveBands: Record<WSSICategory, PolygonFeature | null> = {
+    elevated: bandElevated,
+    minor: bandMinor,
+    moderate: bandModerate,
+    major: bandMajor,
+    extreme: bandExtreme,
+  };
+
+  // Process each band: smooth, simplify, remove fragments
+  const processedFeatures: Feature[] = [];
+  let totalVertices = 0;
+
+  for (const category of CATEGORY_ORDER) {
+    let band = exclusiveBands[category];
+    if (!band?.geometry) continue;
+
+    // Check minimum total area
+    try {
+      const area = turf.area(band);
+      if (area < minArea) continue;
+    } catch {
+      continue;
+    }
+
+    // Light smoothing (only for overview to reduce jaggedness)
+    if (resolution === 'overview') {
+      const smoothed = smoothPolygon(band, SMOOTH_BUFFER_KM);
+      if (smoothed) band = smoothed;
+    }
+
+    // Aggressive simplification
+    try {
+      const simplified = turf.simplify(band, { tolerance, highQuality: false });
+      if (simplified?.geometry) {
+        band = simplified as PolygonFeature;
+      }
+    } catch {
+      // Keep unsimplified
+    }
+
+    // Remove small fragments
+    const cleaned = removeSmallFragments(band, minArea);
+    if (!cleaned) continue;
+    band = cleaned;
+
+    // Final area check
+    try {
+      const finalArea = turf.area(band);
+      if (finalArea < minArea) continue;
+    } catch {
+      continue;
+    }
+
+    const riskLabel = WSSI_TO_RISK[category];
+    const vertices = countVertices(band);
+    totalVertices += vertices;
+
+    processedFeatures.push({
+      type: 'Feature',
+      geometry: band.geometry,
+      properties: {
+        day,
+        category,
+        riskLabel,
+        originalLabel: WSSI_CATEGORY_LABELS[category],
+        riskColor: RISK_COLORS[riskLabel],
+        riskOrder: RISK_ORDER[riskLabel],
+        validTime: lastModified,
+      },
+    });
+  }
+
+  // Sort by risk order
+  processedFeatures.sort((a, b) =>
+    (a.properties?.riskOrder || 0) - (b.properties?.riskOrder || 0)
+  );
+
+  return {
+    geojson: { type: 'FeatureCollection', features: processedFeatures },
+    metrics: { featureCount: processedFeatures.length, vertexCount: totalVertices },
+  };
+}
+
+/**
+ * Fetch raw data from NOAA
+ */
+async function fetchRawWSSI(day: number): Promise<{ features: Feature[]; lastModified: string }> {
+  const layerId = WSSI_LAYER_IDS[day];
+  if (!layerId) throw new Error(`Invalid day: ${day}`);
+
   const queryUrl = `${MAPSERVER_BASE}/${layerId}/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`;
 
   const response = await fetch(queryUrl, {
@@ -113,53 +391,8 @@ async function fetchWSSIData(day: number): Promise<{ geojson: FeatureCollection;
   const lastModified = response.headers.get('Last-Modified') || new Date().toISOString();
   const rawData = await response.json() as FeatureCollection;
 
-  if (!rawData.features || rawData.features.length === 0) {
-    return {
-      geojson: { type: 'FeatureCollection', features: [] },
-      lastModified,
-    };
-  }
-
-  // Just add metadata - don't do heavy processing server-side
-  const processedFeatures: Feature[] = [];
-
-  for (const feature of rawData.features) {
-    if (!feature.geometry) continue;
-    if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') continue;
-
-    const category = extractCategory((feature.properties || {}) as Record<string, unknown>);
-    if (category === null) continue;
-
-    const riskLabel = WSSI_TO_RISK[category];
-    const originalCategory = WSSI_CATEGORY_LABELS[category];
-    const riskColor = RISK_COLORS[riskLabel];
-    const riskOrder = RISK_ORDER[riskLabel];
-
-    processedFeatures.push({
-      type: 'Feature',
-      geometry: feature.geometry,
-      properties: {
-        day,
-        category,
-        originalCategory,
-        riskLabel,
-        riskColor,
-        riskOrder,
-        validTime: lastModified,
-      },
-    });
-  }
-
-  // Sort by risk order (lower severity first, so higher severity renders on top)
-  processedFeatures.sort((a, b) =>
-    (a.properties?.riskOrder || 0) - (b.properties?.riskOrder || 0)
-  );
-
   return {
-    geojson: {
-      type: 'FeatureCollection',
-      features: processedFeatures,
-    },
+    features: rawData.features || [],
     lastModified,
   };
 }
@@ -178,38 +411,96 @@ export async function GET(
     );
   }
 
-  // Check cache
+  // Get resolution from query param (default: overview for performance)
+  const { searchParams } = new URL(request.url);
+  const res = searchParams.get('res') as 'overview' | 'detail' | null;
+  const resolution = res === 'detail' ? 'detail' : 'overview';
+
   const cacheKey = `wssi-day-${day}`;
   const cached = wssiCache.get(cacheKey);
+
+  // Return cached data if valid
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return NextResponse.json(cached.data, {
+    const geojson = resolution === 'detail' ? cached.detail : cached.overview;
+    const payload = JSON.stringify(geojson);
+
+    return new NextResponse(payload, {
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=300',
+        'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
         'X-WSSI-Last-Modified': cached.lastModified,
+        'X-WSSI-Features': String(cached.metrics.featureCount),
+        'X-WSSI-Vertices': String(cached.metrics.vertexCount),
+        'X-WSSI-Bytes': String(cached.metrics.payloadBytes),
+        'X-WSSI-Resolution': resolution,
       },
     });
   }
 
   try {
-    const { geojson, lastModified } = await fetchWSSIData(day);
+    console.log(`[WSSI] Processing day ${day}...`);
+    const startTime = Date.now();
 
-    // Update cache
+    // Fetch raw data
+    const { features, lastModified } = await fetchRawWSSI(day);
+    console.log(`[WSSI] Fetched ${features.length} raw features`);
+
+    if (features.length === 0) {
+      const emptyResult: FeatureCollection = { type: 'FeatureCollection', features: [] };
+      return NextResponse.json(emptyResult, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
+          'X-WSSI-Last-Modified': lastModified,
+          'X-WSSI-Features': '0',
+          'X-WSSI-Vertices': '0',
+        },
+      });
+    }
+
+    // Process both resolutions
+    const overviewResult = processWSSIData(features, day, 'overview', lastModified);
+    const detailResult = processWSSIData(features, day, 'detail', lastModified);
+
+    const overviewPayload = JSON.stringify(overviewResult.geojson);
+
+    // Cache both versions
     wssiCache.set(cacheKey, {
-      data: geojson,
+      overview: overviewResult.geojson,
+      detail: detailResult.geojson,
       timestamp: Date.now(),
       lastModified,
+      metrics: {
+        featureCount: overviewResult.metrics.featureCount,
+        vertexCount: overviewResult.metrics.vertexCount,
+        payloadBytes: overviewPayload.length,
+      },
     });
 
-    return NextResponse.json(geojson, {
+    const processingTime = Date.now() - startTime;
+    console.log(`[WSSI] Day ${day} processed in ${processingTime}ms`);
+    console.log(`[WSSI]   Overview: ${overviewResult.metrics.featureCount} features, ${overviewResult.metrics.vertexCount} vertices, ${(overviewPayload.length / 1024).toFixed(1)} KB`);
+    console.log(`[WSSI]   Detail: ${detailResult.metrics.featureCount} features, ${detailResult.metrics.vertexCount} vertices`);
+
+    // Return requested resolution
+    const resultGeojson = resolution === 'detail' ? detailResult.geojson : overviewResult.geojson;
+    const resultMetrics = resolution === 'detail' ? detailResult.metrics : overviewResult.metrics;
+    const payload = JSON.stringify(resultGeojson);
+
+    return new NextResponse(payload, {
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=300',
+        'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
         'X-WSSI-Last-Modified': lastModified,
+        'X-WSSI-Features': String(resultMetrics.featureCount),
+        'X-WSSI-Vertices': String(resultMetrics.vertexCount),
+        'X-WSSI-Bytes': String(payload.length),
+        'X-WSSI-Resolution': resolution,
+        'X-WSSI-Processing-Time': String(processingTime),
       },
     });
   } catch (error) {
-    console.error('Error fetching WSSI data:', error);
+    console.error('[WSSI] Error:', error);
 
     return NextResponse.json(
       {
