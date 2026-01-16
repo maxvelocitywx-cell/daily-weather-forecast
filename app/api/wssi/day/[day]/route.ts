@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as turf from '@turf/turf';
 import { kv } from '@vercel/kv';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore - JSTS ESM imports
+import { GeoJSONReader, GeoJSONWriter } from 'jsts/org/locationtech/jts/io';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore - JSTS ESM imports
+import GeometryFactory from 'jsts/org/locationtech/jts/geom/GeometryFactory';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore - JSTS ESM imports
+import TopologyPreservingSimplifier from 'jsts/org/locationtech/jts/simplify/TopologyPreservingSimplifier';
 import type { Feature, FeatureCollection, Polygon, MultiPolygon, Position } from 'geojson';
 
 export const runtime = 'nodejs';
@@ -13,6 +22,21 @@ function logTiming(label: string, startTime: number) {
   console.log(`[WSSI] ${label}: ${elapsed}ms`);
   return elapsed;
 }
+
+// JSTS reader/writer for geometry validation
+const geometryFactory = new GeometryFactory();
+const geoJsonReader = new GeoJSONReader(geometryFactory);
+const geoJsonWriter = new GeoJSONWriter();
+
+// Geometry limits to prevent Mapbox triangulation failures
+const MAX_VERTICES_PER_FEATURE = 50000;
+const MIN_HOLE_AREA_KM2 = 100; // Remove holes smaller than 100 km²
+
+// Hard simplification tolerances in METERS (EPSG:3857)
+const SIMPLIFY_TOLERANCE_METERS = {
+  overview: 15000, // 15km - aggressive for national view
+  detail: 5000,    // 5km - moderate for zoomed view
+};
 
 // ArcGIS MapServer layer IDs for Overall Impact
 const WSSI_LAYER_IDS: Record<number, number> = {
@@ -253,6 +277,273 @@ function morphologicalSmooth(
 }
 
 /**
+ * Convert WGS84 (EPSG:4326) to Web Mercator (EPSG:3857)
+ */
+function toWebMercator(lon: number, lat: number): [number, number] {
+  const x = lon * 20037508.34 / 180;
+  let y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180);
+  y = y * 20037508.34 / 180;
+  return [x, y];
+}
+
+/**
+ * Convert Web Mercator (EPSG:3857) to WGS84 (EPSG:4326)
+ */
+function toWGS84(x: number, y: number): [number, number] {
+  const lon = x * 180 / 20037508.34;
+  let lat = y * 180 / 20037508.34;
+  lat = 180 / Math.PI * (2 * Math.atan(Math.exp(lat * Math.PI / 180)) - Math.PI / 2);
+  return [lon, lat];
+}
+
+/**
+ * Reproject a ring of coordinates
+ */
+function reprojectRing(ring: Position[], toMercator: boolean): Position[] {
+  return ring.map(coord => {
+    if (toMercator) {
+      return toWebMercator(coord[0], coord[1]);
+    } else {
+      return toWGS84(coord[0], coord[1]);
+    }
+  });
+}
+
+/**
+ * Reproject entire geometry
+ */
+function reprojectGeometry(geom: Polygon | MultiPolygon, toMercator: boolean): Polygon | MultiPolygon {
+  if (geom.type === 'Polygon') {
+    return {
+      type: 'Polygon',
+      coordinates: geom.coordinates.map(ring => reprojectRing(ring, toMercator)),
+    };
+  } else {
+    return {
+      type: 'MultiPolygon',
+      coordinates: geom.coordinates.map(poly =>
+        poly.map(ring => reprojectRing(ring, toMercator))
+      ),
+    };
+  }
+}
+
+/**
+ * Make geometry valid using JSTS buffer(0) trick
+ */
+function makeValid(feature: PolygonFeature): PolygonFeature | null {
+  try {
+    const jstsGeom = geoJsonReader.read(feature.geometry);
+
+    // buffer(0) is a classic trick to fix self-intersections
+    let validGeom = jstsGeom.buffer(0);
+
+    // If still invalid, try more aggressive repair
+    if (!validGeom.isValid()) {
+      // Use convex hull as fallback (loses detail but guaranteed valid)
+      validGeom = jstsGeom.convexHull();
+    }
+
+    if (validGeom.isEmpty()) return null;
+
+    const validGeoJson = geoJsonWriter.write(validGeom);
+
+    // Ensure we have a Polygon or MultiPolygon
+    if (validGeoJson.type !== 'Polygon' && validGeoJson.type !== 'MultiPolygon') {
+      return null;
+    }
+
+    return {
+      ...feature,
+      geometry: validGeoJson as Polygon | MultiPolygon,
+    };
+  } catch (err) {
+    console.warn('[WSSI] makeValid failed:', err);
+    return feature; // Return original if validation fails
+  }
+}
+
+/**
+ * Remove small interior holes from polygons
+ */
+function filterSmallHoles(feature: PolygonFeature): PolygonFeature {
+  const minHoleAreaM2 = MIN_HOLE_AREA_KM2 * 1_000_000;
+  const geom = feature.geometry;
+
+  if (geom.type === 'Polygon') {
+    // First ring is exterior, rest are holes
+    if (geom.coordinates.length <= 1) return feature;
+
+    const filteredRings = [geom.coordinates[0]]; // Keep exterior
+
+    for (let i = 1; i < geom.coordinates.length; i++) {
+      try {
+        const holePolygon = turf.polygon([geom.coordinates[i]]);
+        const holeArea = turf.area(holePolygon);
+        if (holeArea >= minHoleAreaM2) {
+          filteredRings.push(geom.coordinates[i]);
+        }
+      } catch {
+        // Skip invalid holes
+      }
+    }
+
+    return {
+      ...feature,
+      geometry: { type: 'Polygon', coordinates: filteredRings },
+    };
+  }
+
+  if (geom.type === 'MultiPolygon') {
+    const filteredPolygons = geom.coordinates.map(poly => {
+      if (poly.length <= 1) return poly;
+
+      const filteredRings = [poly[0]]; // Keep exterior
+
+      for (let i = 1; i < poly.length; i++) {
+        try {
+          const holePolygon = turf.polygon([poly[i]]);
+          const holeArea = turf.area(holePolygon);
+          if (holeArea >= minHoleAreaM2) {
+            filteredRings.push(poly[i]);
+          }
+        } catch {
+          // Skip invalid holes
+        }
+      }
+
+      return filteredRings;
+    });
+
+    return {
+      ...feature,
+      geometry: { type: 'MultiPolygon', coordinates: filteredPolygons },
+    };
+  }
+
+  return feature;
+}
+
+/**
+ * Hard simplify in EPSG:3857 with meter-based tolerance
+ * This guarantees bounded vertex count
+ */
+function hardSimplify(feature: PolygonFeature, toleranceMeters: number): PolygonFeature {
+  try {
+    // Reproject to Web Mercator
+    const mercatorGeom = reprojectGeometry(feature.geometry, true);
+    const mercatorFeature: PolygonFeature = {
+      ...feature,
+      geometry: mercatorGeom,
+    };
+
+    // Simplify with preserveTopology using JSTS for better results
+    const jstsGeom = geoJsonReader.read(mercatorGeom);
+    const simplifier = new TopologyPreservingSimplifier(jstsGeom);
+    simplifier.setDistanceTolerance(toleranceMeters);
+    const simplified = simplifier.getResultGeometry();
+
+    if (simplified.isEmpty()) {
+      // Fallback: use turf simplify
+      const turfSimplified = turf.simplify(mercatorFeature, {
+        tolerance: toleranceMeters / 111000, // Convert meters to degrees approx
+        highQuality: true,
+        mutate: false,
+      });
+
+      if (turfSimplified?.geometry) {
+        const wgs84Geom = reprojectGeometry(turfSimplified.geometry as Polygon | MultiPolygon, false);
+        return { ...feature, geometry: wgs84Geom };
+      }
+      return feature;
+    }
+
+    const simplifiedGeoJson = geoJsonWriter.write(simplified);
+
+    if (simplifiedGeoJson.type !== 'Polygon' && simplifiedGeoJson.type !== 'MultiPolygon') {
+      return feature;
+    }
+
+    // Reproject back to WGS84
+    const wgs84Geom = reprojectGeometry(simplifiedGeoJson as Polygon | MultiPolygon, false);
+
+    return {
+      ...feature,
+      geometry: wgs84Geom,
+    };
+  } catch (err) {
+    console.warn('[WSSI] hardSimplify failed:', err);
+    return feature;
+  }
+}
+
+/**
+ * Ensure vertex count is under limit by increasing simplification if needed
+ */
+function enforceVertexLimit(feature: PolygonFeature, resolution: 'overview' | 'detail'): PolygonFeature {
+  let result = feature;
+  let tolerance = SIMPLIFY_TOLERANCE_METERS[resolution];
+  let attempts = 0;
+  const maxAttempts = 5;
+
+  while (attempts < maxAttempts) {
+    const { vertices } = countGeometry(result);
+
+    if (vertices <= MAX_VERTICES_PER_FEATURE) {
+      return result;
+    }
+
+    console.log(`[WSSI] Vertex count ${vertices} exceeds ${MAX_VERTICES_PER_FEATURE}, increasing tolerance to ${tolerance * 1.5}m`);
+    tolerance *= 1.5;
+    result = hardSimplify(result, tolerance);
+    attempts++;
+  }
+
+  // If still too many vertices after max attempts, use very aggressive simplification
+  console.warn(`[WSSI] Could not reduce vertices under limit after ${maxAttempts} attempts`);
+  return hardSimplify(result, tolerance * 2);
+}
+
+/**
+ * FINAL GEOMETRY SANITIZATION
+ * Applies all fixes to ensure Mapbox can render without triangulation failures
+ */
+function sanitizeGeometry(feature: PolygonFeature, resolution: 'overview' | 'detail'): PolygonFeature | null {
+  try {
+    // Step 1: Make geometry valid using JSTS
+    let result = makeValid(feature);
+    if (!result) return null;
+
+    // Step 2: Filter small holes
+    result = filterSmallHoles(result);
+
+    // Step 3: Hard simplify in EPSG:3857 with meter tolerance
+    result = hardSimplify(result, SIMPLIFY_TOLERANCE_METERS[resolution]);
+
+    // Step 4: Make valid again after simplification (can introduce issues)
+    result = makeValid(result);
+    if (!result) return null;
+
+    // Step 5: Enforce vertex limit
+    result = enforceVertexLimit(result, resolution);
+
+    // Step 6: Final validation
+    result = makeValid(result);
+    if (!result) return null;
+
+    // Verify we have valid geometry type
+    if (result.geometry.type !== 'Polygon' && result.geometry.type !== 'MultiPolygon') {
+      return null;
+    }
+
+    return result;
+  } catch (err) {
+    console.error('[WSSI] sanitizeGeometry failed:', err);
+    return null;
+  }
+}
+
+/**
  * Process raw WSSI data into dissolved, simplified exclusive bands
  */
 function processWSSIData(
@@ -310,8 +601,7 @@ function processWSSIData(
     extreme: bandExtreme,
   };
 
-  // Process each band: PRE-simplify -> smooth -> POST-simplify -> remove fragments
-  // Key: simplify BEFORE buffer to drastically reduce vertex count
+  // Process each band with full geometry sanitization pipeline
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
   let totalComponents = 0;
@@ -349,24 +639,19 @@ function processWSSIData(
       }
     }
 
-    // Step 3: POST-SIMPLIFY the smoothed geometry
-    try {
-      const postSimplified = turf.simplify(band, {
-        tolerance: params.postSimplifyTol,
-        highQuality: true, // High quality for final output
-        mutate: false,
-      });
-      if (postSimplified?.geometry) {
-        band = postSimplified as PolygonFeature;
-      }
-    } catch {
-      // Keep unsimplified if it fails
-    }
+    // Step 3: Remove small fragments early
+    const fragCleaned = removeSmallFragments(band, params.minAreaKm2);
+    if (!fragCleaned) continue;
+    band = fragCleaned;
 
-    // Step 4: Remove small fragments
-    const cleaned = removeSmallFragments(band, params.minAreaKm2);
-    if (!cleaned) continue;
-    band = cleaned;
+    // Step 4: MANDATORY GEOMETRY SANITIZATION
+    // This is critical to prevent Mapbox triangulation failures
+    const sanitized = sanitizeGeometry(band, resolution);
+    if (!sanitized) {
+      console.warn(`[WSSI] Skipping ${category} - sanitization returned null`);
+      continue;
+    }
+    band = sanitized;
 
     // Step 5: Final area check
     try {
@@ -380,6 +665,8 @@ function processWSSIData(
     const { vertices, components } = countGeometry(band);
     totalVertices += vertices;
     totalComponents += components;
+
+    console.log(`[WSSI] ${category}: ${vertices} vertices, ${components} components`);
 
     processedFeatures.push({
       type: 'Feature',
