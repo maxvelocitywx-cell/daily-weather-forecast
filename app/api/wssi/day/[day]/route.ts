@@ -28,21 +28,24 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters in KILOMETERS (Turf buffer uses km by default)
+// Smoothing parameters - FAST settings to avoid timeout
+// Key insight: simplify FIRST aggressively, then do small buffer ops
 const SMOOTH_PARAMS = {
   overview: {
-    bufferOut: 40,      // Buffer out 40km
-    bufferIn: 40,       // Buffer in 40km
-    simplifyTol: 0.10,  // ~11km at 40°N in degrees
-    minAreaKm2: 1000,   // Min 1000 km²
-    bufferSteps: 16,    // Fewer steps for speed
+    preSimplifyTol: 0.08, // Simplify BEFORE buffer to reduce vertices
+    bufferOut: 15,        // Buffer out 15km (reduced from 40)
+    bufferIn: 15,         // Buffer in 15km
+    postSimplifyTol: 0.12, // Final simplification
+    minAreaKm2: 800,      // Min 800 km²
+    bufferSteps: 8,       // Minimal steps for speed
   },
   detail: {
-    bufferOut: 12,      // Buffer out 12km
-    bufferIn: 12,       // Buffer in 12km
-    simplifyTol: 0.025, // ~2.5km at 40°N
-    minAreaKm2: 100,    // Min 100 km²
-    bufferSteps: 24,    // More steps for quality
+    preSimplifyTol: 0.02, // Light pre-simplification
+    bufferOut: 8,         // Buffer out 8km (reduced from 12)
+    bufferIn: 8,          // Buffer in 8km
+    postSimplifyTol: 0.03, // Final simplification
+    minAreaKm2: 80,       // Min 80 km²
+    bufferSteps: 12,      // Moderate steps
   },
 };
 
@@ -297,7 +300,8 @@ function processWSSIData(
     extreme: bandExtreme,
   };
 
-  // Process each band: smooth -> simplify -> remove fragments
+  // Process each band: PRE-simplify -> smooth -> POST-simplify -> remove fragments
+  // Key: simplify BEFORE buffer to drastically reduce vertex count
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
   let totalComponents = 0;
@@ -306,8 +310,23 @@ function processWSSIData(
     let band = exclusiveBands[category];
     if (!band?.geometry) continue;
 
-    // Step 1: Morphological smoothing (buffer out then in)
-    // This is the key to eliminating stair-step edges!
+    // Step 1: PRE-SIMPLIFY aggressively to reduce vertices BEFORE buffer
+    // This is critical for performance - buffer ops are O(n²) on vertices
+    try {
+      const preSimplified = turf.simplify(band, {
+        tolerance: params.preSimplifyTol,
+        highQuality: false, // Fast mode for pre-simplification
+        mutate: false,
+      });
+      if (preSimplified?.geometry) {
+        band = preSimplified as PolygonFeature;
+      }
+    } catch {
+      // Continue with original
+    }
+
+    // Step 2: Morphological smoothing (buffer out then in)
+    // Now much faster because we have fewer vertices
     const smoothed = morphologicalSmooth(
       band,
       params.bufferOut,
@@ -318,26 +337,26 @@ function processWSSIData(
       band = smoothed;
     }
 
-    // Step 2: Simplify the smoothed geometry
+    // Step 3: POST-SIMPLIFY the smoothed geometry
     try {
-      const simplified = turf.simplify(band, {
-        tolerance: params.simplifyTol,
-        highQuality: true, // Use Visvalingam for better quality
+      const postSimplified = turf.simplify(band, {
+        tolerance: params.postSimplifyTol,
+        highQuality: true, // High quality for final output
         mutate: false,
       });
-      if (simplified?.geometry) {
-        band = simplified as PolygonFeature;
+      if (postSimplified?.geometry) {
+        band = postSimplified as PolygonFeature;
       }
     } catch {
       // Keep unsimplified if it fails
     }
 
-    // Step 3: Remove small fragments AFTER simplification
+    // Step 4: Remove small fragments
     const cleaned = removeSmallFragments(band, params.minAreaKm2);
     if (!cleaned) continue;
     band = cleaned;
 
-    // Step 4: Final area check
+    // Step 5: Final area check
     try {
       const finalArea = turf.area(band);
       if (finalArea < params.minAreaKm2 * 1_000_000) continue;
