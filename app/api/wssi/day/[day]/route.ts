@@ -28,17 +28,22 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Simplification tolerances in DEGREES (Turf simplify works in coordinate units)
-// These translate to roughly: overview ~15-20km, detail ~3-5km at US latitudes
-const SIMPLIFY_TOLERANCE = {
-  overview: 0.15,  // ~16km at 40°N - very aggressive
-  detail: 0.03,    // ~3km at 40°N
-};
-
-// Minimum area thresholds in square meters
-const MIN_AREA = {
-  overview: 500_000_000, // 500 km² - drop small islands aggressively
-  detail: 50_000_000,    // 50 km²
+// Smoothing parameters in KILOMETERS (Turf buffer uses km by default)
+const SMOOTH_PARAMS = {
+  overview: {
+    bufferOut: 40,      // Buffer out 40km
+    bufferIn: 40,       // Buffer in 40km
+    simplifyTol: 0.10,  // ~11km at 40°N in degrees
+    minAreaKm2: 1000,   // Min 1000 km²
+    bufferSteps: 16,    // Fewer steps for speed
+  },
+  detail: {
+    bufferOut: 12,      // Buffer out 12km
+    bufferIn: 12,       // Buffer in 12km
+    simplifyTol: 0.025, // ~2.5km at 40°N
+    minAreaKm2: 100,    // Min 100 km²
+    bufferSteps: 24,    // More steps for quality
+  },
 };
 
 // Cache with processed results
@@ -107,8 +112,9 @@ function countGeometry(feature: PolygonFeature): { vertices: number; components:
 /**
  * Remove small polygon fragments from a MultiPolygon
  */
-function removeSmallFragments(feature: PolygonFeature, minAreaM2: number): PolygonFeature | null {
+function removeSmallFragments(feature: PolygonFeature, minAreaKm2: number): PolygonFeature | null {
   const geom = feature.geometry;
+  const minAreaM2 = minAreaKm2 * 1_000_000;
 
   if (geom.type === 'Polygon') {
     try {
@@ -200,6 +206,40 @@ function safeDifference(a: PolygonFeature | null, b: PolygonFeature | null): Pol
 }
 
 /**
+ * Apply morphological smoothing: buffer out then buffer in
+ * This eliminates jagged stair-step edges
+ */
+function morphologicalSmooth(
+  feature: PolygonFeature,
+  bufferOutKm: number,
+  bufferInKm: number,
+  steps: number
+): PolygonFeature | null {
+  try {
+    // Buffer OUT (dilate) - expands the polygon, filling in jagged edges
+    const bufferedOut = turf.buffer(feature, bufferOutKm, {
+      units: 'kilometers',
+      steps: steps,
+    });
+
+    if (!bufferedOut?.geometry) return feature;
+
+    // Buffer IN (erode) - contracts back, now with smooth edges
+    const bufferedIn = turf.buffer(bufferedOut, -bufferInKm, {
+      units: 'kilometers',
+      steps: steps,
+    });
+
+    if (!bufferedIn?.geometry) return feature;
+
+    return bufferedIn as PolygonFeature;
+  } catch (err) {
+    console.warn('[WSSI] Smoothing failed, using original:', err);
+    return feature;
+  }
+}
+
+/**
  * Process raw WSSI data into dissolved, simplified exclusive bands
  */
 function processWSSIData(
@@ -209,8 +249,7 @@ function processWSSIData(
   lastModified: string
 ): { geojson: FeatureCollection; metrics: { featureCount: number; vertexCount: number; componentCount: number } } {
 
-  const tolerance = SIMPLIFY_TOLERANCE[resolution];
-  const minArea = MIN_AREA[resolution];
+  const params = SMOOTH_PARAMS[resolution];
 
   // Group features by category
   const featuresByCategory: Record<WSSICategory, PolygonFeature[]> = {
@@ -258,7 +297,7 @@ function processWSSIData(
     extreme: bandExtreme,
   };
 
-  // Process each band: simplify FIRST, then remove fragments
+  // Process each band: smooth -> simplify -> remove fragments
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
   let totalComponents = 0;
@@ -267,11 +306,23 @@ function processWSSIData(
     let band = exclusiveBands[category];
     if (!band?.geometry) continue;
 
-    // Step 1: Aggressive simplification (in WGS84 degrees)
+    // Step 1: Morphological smoothing (buffer out then in)
+    // This is the key to eliminating stair-step edges!
+    const smoothed = morphologicalSmooth(
+      band,
+      params.bufferOut,
+      params.bufferIn,
+      params.bufferSteps
+    );
+    if (smoothed) {
+      band = smoothed;
+    }
+
+    // Step 2: Simplify the smoothed geometry
     try {
       const simplified = turf.simplify(band, {
-        tolerance,
-        highQuality: false, // Faster
+        tolerance: params.simplifyTol,
+        highQuality: true, // Use Visvalingam for better quality
         mutate: false,
       });
       if (simplified?.geometry) {
@@ -281,15 +332,15 @@ function processWSSIData(
       // Keep unsimplified if it fails
     }
 
-    // Step 2: Remove small fragments AFTER simplification
-    const cleaned = removeSmallFragments(band, minArea);
+    // Step 3: Remove small fragments AFTER simplification
+    const cleaned = removeSmallFragments(band, params.minAreaKm2);
     if (!cleaned) continue;
     band = cleaned;
 
-    // Step 3: Final area check
+    // Step 4: Final area check
     try {
       const finalArea = turf.area(band);
-      if (finalArea < minArea) continue;
+      if (finalArea < params.minAreaKm2 * 1_000_000) continue;
     } catch {
       continue;
     }

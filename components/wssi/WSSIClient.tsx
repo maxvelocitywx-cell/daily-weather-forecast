@@ -14,6 +14,9 @@ const MAPBOX_STYLE = 'mapbox://styles/maxvelocity/cmkew9qqf003y01rxdwxp37k4';
 // Zoom threshold for resolution switching
 const DETAIL_ZOOM_THRESHOLD = 6;
 
+// Debounce delay for fetch (ms)
+const FETCH_DEBOUNCE_MS = 200;
+
 // Risk levels for legend
 const RISK_LEVELS = [
   { label: 'Marginal Risk', wssiLabel: 'Winter Weather Area', color: '#60A5FA' },
@@ -44,19 +47,28 @@ export default function WSSIClient() {
   const sourceAdded = useRef(false);
   const layersAdded = useRef(false);
 
+  // Debounce timer ref
+  const fetchDebounceTimer = useRef<NodeJS.Timeout | null>(null);
+
   const [mapLoaded, setMapLoaded] = useState(false);
   const [selectedDay, setSelectedDay] = useState(1);
-  const [currentResolution, setCurrentResolution] = useState<Resolution>('overview');
   const [loading, setLoading] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<{ features: number; vertices: number; bytes: number } | null>(null);
+  const [displayResolution, setDisplayResolution] = useState<Resolution>('overview');
 
   // Cache: day -> { overview: data, detail: data }
   const dataCache = useRef<Record<number, Record<Resolution, WSSIGeoJSON | null>>>({});
 
-  // Track last fetched to prevent duplicate requests
-  const lastFetch = useRef<{ day: number; resolution: Resolution } | null>(null);
+  // Track current resolution (not in state to avoid re-renders)
+  const currentResolution = useRef<Resolution>('overview');
+
+  // Track current day for internal use
+  const currentDay = useRef<number>(1);
+
+  // Track in-flight fetch to prevent duplicates
+  const inFlightFetch = useRef<string | null>(null);
 
   // Add WSSI layers to map (called once after style loads)
   const addWSSILayers = useCallback(() => {
@@ -71,18 +83,35 @@ export default function WSSIClient() {
       sourceAdded.current = true;
     }
 
-    // Add fill layer
+    // Add fill layer with 0.40 opacity as specified
     map.current.addLayer({
       id: 'wssi-fill',
       type: 'fill',
       source: 'wssi',
       paint: {
         'fill-color': ['get', 'riskColor'],
-        'fill-opacity': 0.6,
+        'fill-opacity': 0.40,
       },
     });
 
-    // Add outline layer
+    // Add halo outline (wider, semi-transparent for glow effect)
+    map.current.addLayer({
+      id: 'wssi-outline-halo',
+      type: 'line',
+      source: 'wssi',
+      paint: {
+        'line-color': ['get', 'riskColor'],
+        'line-width': 5,
+        'line-opacity': 0.3,
+        'line-blur': 2,
+      },
+      layout: {
+        'line-join': 'round',
+        'line-cap': 'round',
+      },
+    });
+
+    // Add main outline
     map.current.addLayer({
       id: 'wssi-outline',
       type: 'line',
@@ -91,6 +120,10 @@ export default function WSSIClient() {
         'line-color': ['get', 'riskColor'],
         'line-width': 2,
         'line-opacity': 0.9,
+      },
+      layout: {
+        'line-join': 'round',
+        'line-cap': 'round',
       },
     });
 
@@ -128,18 +161,42 @@ export default function WSSIClient() {
     layersAdded.current = true;
   }, []);
 
-  // Fetch WSSI data for a day/resolution
-  const fetchWSSIData = useCallback(async (day: number, resolution: Resolution) => {
+  // Update map source with data (no state changes, just map update)
+  const updateMapData = useCallback((data: WSSIGeoJSON | null) => {
+    if (!map.current || !sourceAdded.current) return;
+
+    const source = map.current.getSource('wssi') as mapboxgl.GeoJSONSource;
+    if (!source) return;
+
+    if (data) {
+      source.setData(data);
+    } else {
+      source.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, []);
+
+  // Fetch WSSI data for a day/resolution - returns data, doesn't update state much
+  const fetchWSSIData = useCallback(async (day: number, resolution: Resolution): Promise<WSSIGeoJSON | null> => {
     // Check cache first
     if (dataCache.current[day]?.[resolution]) {
-      return dataCache.current[day][resolution];
+      const cached = dataCache.current[day][resolution];
+      // Update display metrics from cache
+      if (cached && cached.features) {
+        setMetrics({
+          features: cached.features.length,
+          vertices: 0, // We don't have this from cache
+          bytes: 0,
+        });
+      }
+      return cached;
     }
 
-    // Prevent duplicate fetches
-    if (lastFetch.current?.day === day && lastFetch.current?.resolution === resolution) {
+    // Prevent duplicate in-flight fetches
+    const fetchKey = `${day}-${resolution}`;
+    if (inFlightFetch.current === fetchKey) {
       return null;
     }
-    lastFetch.current = { day, resolution };
+    inFlightFetch.current = fetchKey;
 
     setLoading(true);
     setError(null);
@@ -186,25 +243,39 @@ export default function WSSIClient() {
       return null;
     } finally {
       setLoading(false);
-      lastFetch.current = null;
+      inFlightFetch.current = null;
     }
   }, []);
 
-  // Update map source with data
-  const updateMapData = useCallback((data: WSSIGeoJSON | null) => {
-    if (!map.current || !sourceAdded.current) return;
-
-    const source = map.current.getSource('wssi') as mapboxgl.GeoJSONSource;
-    if (!source) return;
-
-    if (data) {
-      source.setData(data);
-    } else {
-      source.setData({ type: 'FeatureCollection', features: [] });
+  // Debounced load function - fetches and updates map
+  const loadDataDebounced = useCallback((day: number, resolution: Resolution) => {
+    // Clear any pending debounce
+    if (fetchDebounceTimer.current) {
+      clearTimeout(fetchDebounceTimer.current);
     }
-  }, []);
 
-  // Initialize map ONCE
+    fetchDebounceTimer.current = setTimeout(async () => {
+      const data = await fetchWSSIData(day, resolution);
+      updateMapData(data);
+      setDisplayResolution(resolution);
+    }, FETCH_DEBOUNCE_MS);
+  }, [fetchWSSIData, updateMapData]);
+
+  // Handle zoom changes - compute resolution and trigger fetch if needed
+  const handleZoomEnd = useCallback(() => {
+    if (!map.current) return;
+
+    const zoom = map.current.getZoom();
+    const newRes: Resolution = zoom >= DETAIL_ZOOM_THRESHOLD ? 'detail' : 'overview';
+
+    // Only refetch if resolution actually changed
+    if (newRes !== currentResolution.current) {
+      currentResolution.current = newRes;
+      loadDataDebounced(currentDay.current, newRes);
+    }
+  }, [loadDataDebounced]);
+
+  // Initialize map ONCE - no state dependencies that could cause remount
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
 
@@ -228,6 +299,9 @@ export default function WSSIClient() {
     map.current.on('load', () => {
       addWSSILayers();
       setMapLoaded(true);
+
+      // Initial data load after map is ready
+      loadDataDebounced(currentDay.current, currentResolution.current);
     });
 
     // Handle style reload (if style changes externally)
@@ -237,48 +311,37 @@ export default function WSSIClient() {
       addWSSILayers();
     });
 
-    // Zoom-based resolution switching
-    map.current.on('zoomend', () => {
-      if (!map.current) return;
-      const zoom = map.current.getZoom();
-      const newRes: Resolution = zoom >= DETAIL_ZOOM_THRESHOLD ? 'detail' : 'overview';
-      if (newRes !== currentResolution) {
-        setCurrentResolution(newRes);
-      }
-    });
+    // Zoom-based resolution switching - use zoomend (not zoom) to trigger once per interaction
+    map.current.on('zoomend', handleZoomEnd);
 
     return () => {
+      if (fetchDebounceTimer.current) {
+        clearTimeout(fetchDebounceTimer.current);
+      }
       popup.current?.remove();
       map.current?.remove();
       map.current = null;
       sourceAdded.current = false;
       layersAdded.current = false;
     };
-  }, [addWSSILayers, currentResolution]);
+  }, [addWSSILayers, handleZoomEnd, loadDataDebounced]);
 
-  // Load data when day or resolution changes
-  useEffect(() => {
-    if (!mapLoaded) return;
-
-    const loadData = async () => {
-      const data = await fetchWSSIData(selectedDay, currentResolution);
-      updateMapData(data);
-    };
-
-    loadData();
-  }, [mapLoaded, selectedDay, currentResolution, fetchWSSIData, updateMapData]);
-
-  const handleDayChange = (day: number) => {
+  // Handle day change - only this state change triggers a refetch
+  const handleDayChange = useCallback((day: number) => {
     setSelectedDay(day);
-  };
+    currentDay.current = day;
 
-  const handleRefresh = () => {
+    // Load data for new day at current resolution
+    loadDataDebounced(day, currentResolution.current);
+  }, [loadDataDebounced]);
+
+  const handleRefresh = useCallback(() => {
     // Clear cache for current day and refetch
-    if (dataCache.current[selectedDay]) {
-      dataCache.current[selectedDay] = { overview: null, detail: null };
+    if (dataCache.current[currentDay.current]) {
+      dataCache.current[currentDay.current] = { overview: null, detail: null };
     }
-    fetchWSSIData(selectedDay, currentResolution).then(updateMapData);
-  };
+    loadDataDebounced(currentDay.current, currentResolution.current);
+  }, [loadDataDebounced]);
 
   return (
     <div className="h-screen bg-mv-bg-primary flex flex-col overflow-hidden">
@@ -298,7 +361,7 @@ export default function WSSIClient() {
               </span>
             )}
             <span className="text-xs text-cyan-400 font-mono hidden sm:inline">
-              {currentResolution}
+              {displayResolution}
             </span>
             {metrics && (
               <span className="text-xs text-mv-text-muted hidden lg:inline font-mono">
