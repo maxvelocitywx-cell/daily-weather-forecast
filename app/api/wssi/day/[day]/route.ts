@@ -29,13 +29,15 @@ const geoJsonReader = new GeoJSONReader(geometryFactory);
 const geoJsonWriter = new GeoJSONWriter();
 
 // Geometry limits to prevent Mapbox triangulation failures
-const MAX_VERTICES_PER_FEATURE = 50000;
-const MIN_HOLE_AREA_KM2 = 100; // Remove holes smaller than 100 km²
+// CRITICAL: These values must be aggressive to prevent diagonal triangles
+const MAX_VERTICES_PER_FEATURE = 15000; // Reduced from 50k - Mapbox struggles with complex polygons
+const MIN_HOLE_AREA_KM2 = 200; // Remove holes smaller than 200 km² (increased from 100)
 
 // Hard simplification tolerances in METERS (EPSG:3857)
+// CRITICAL: Must be large enough to cap vertex count
 const SIMPLIFY_TOLERANCE_METERS = {
-  overview: 15000, // 15km - aggressive for national view
-  detail: 5000,    // 5km - moderate for zoomed view
+  overview: 25000, // 25km - very aggressive for national view
+  detail: 8000,    // 8km - moderate for zoomed view
 };
 
 // ArcGIS MapServer layer IDs for Overall Impact
@@ -509,33 +511,55 @@ function enforceVertexLimit(feature: PolygonFeature, resolution: 'overview' | 'd
  * Applies all fixes to ensure Mapbox can render without triangulation failures
  */
 function sanitizeGeometry(feature: PolygonFeature, resolution: 'overview' | 'detail'): PolygonFeature | null {
+  const startVertices = countGeometry(feature).vertices;
+  console.log(`[WSSI] sanitizeGeometry START: ${startVertices} vertices, resolution=${resolution}`);
+
   try {
     // Step 1: Make geometry valid using JSTS
     let result = makeValid(feature);
-    if (!result) return null;
+    if (!result) {
+      console.warn('[WSSI] sanitizeGeometry: makeValid returned null');
+      return null;
+    }
+    console.log(`[WSSI] After makeValid: ${countGeometry(result).vertices} vertices`);
 
     // Step 2: Filter small holes
     result = filterSmallHoles(result);
+    console.log(`[WSSI] After filterSmallHoles: ${countGeometry(result).vertices} vertices`);
 
     // Step 3: Hard simplify in EPSG:3857 with meter tolerance
-    result = hardSimplify(result, SIMPLIFY_TOLERANCE_METERS[resolution]);
+    const tolerance = SIMPLIFY_TOLERANCE_METERS[resolution];
+    console.log(`[WSSI] Applying hardSimplify with tolerance ${tolerance}m`);
+    result = hardSimplify(result, tolerance);
+    console.log(`[WSSI] After hardSimplify: ${countGeometry(result).vertices} vertices`);
 
     // Step 4: Make valid again after simplification (can introduce issues)
     result = makeValid(result);
-    if (!result) return null;
-
-    // Step 5: Enforce vertex limit
-    result = enforceVertexLimit(result, resolution);
-
-    // Step 6: Final validation
-    result = makeValid(result);
-    if (!result) return null;
-
-    // Verify we have valid geometry type
-    if (result.geometry.type !== 'Polygon' && result.geometry.type !== 'MultiPolygon') {
+    if (!result) {
+      console.warn('[WSSI] sanitizeGeometry: makeValid after simplify returned null');
       return null;
     }
 
+    // Step 5: Enforce vertex limit
+    result = enforceVertexLimit(result, resolution);
+    const finalVertices = countGeometry(result).vertices;
+    console.log(`[WSSI] After enforceVertexLimit: ${finalVertices} vertices`);
+
+    // Step 6: Final validation
+    result = makeValid(result);
+    if (!result) {
+      console.warn('[WSSI] sanitizeGeometry: final makeValid returned null');
+      return null;
+    }
+
+    // Verify we have valid geometry type
+    const geomType = result.geometry.type;
+    if (geomType !== 'Polygon' && geomType !== 'MultiPolygon') {
+      console.warn(`[WSSI] sanitizeGeometry: invalid geometry type ${geomType}`);
+      return null;
+    }
+
+    console.log(`[WSSI] sanitizeGeometry COMPLETE: ${startVertices} -> ${finalVertices} vertices`);
     return result;
   } catch (err) {
     console.error('[WSSI] sanitizeGeometry failed:', err);
