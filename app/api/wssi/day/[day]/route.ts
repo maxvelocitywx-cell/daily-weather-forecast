@@ -62,28 +62,31 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters - CURVED edges, not lines
-// Heavy pre-simplification + high buffer steps = smooth curves that compute fast
-// The key is simplifying BEFORE buffering, then using many buffer segments
+// Smoothing parameters - smooth blob-like boundaries (like SPC/WPC graphics)
+// Pipeline: light pre-simplify -> symmetric buffer -> densify -> minimal post-simplify
 const SMOOTH_PARAMS = {
   // Use same params for both resolutions to ensure consistent appearance at all zooms
   overview: {
-    preSimplifyTol: 0.03,   // Heavy pre-simplification - reduces points before expensive buffer
-    useBuffer: true,        // USE buffer for curved edges
-    bufferOut: 60,          // 60km buffer out (~37 miles) - creates curved edges
-    bufferIn: 55,           // 55km buffer in - net 5km expansion
-    bufferSteps: 48,        // HIGH step count - more segments = smoother curves
-    postSimplifyTol: 0.001, // Minimal post-simplification to keep curves smooth
-    minAreaKm2: 500,        // Min 500 km² to remove small features
+    preSimplifyTol: 0.005,  // LIGHT pre-simplification - just remove stair-steps, keep shape
+    useBuffer: true,        // USE buffer for rounding
+    bufferOut: 40,          // 40km symmetric buffer out
+    bufferIn: 40,           // 40km symmetric buffer in (same distance = pure rounding)
+    bufferSteps: 48,        // High step count for smooth arcs
+    densifyMaxSegment: 15,  // Max 15km segment length - densify longer segments
+    densifyInterval: 4,     // Insert points every 4km on long segments
+    postSimplifyTol: 0.0005, // MINIMAL post-simplification to preserve curves
+    minAreaKm2: 400,        // Min 400 km² to remove small features
   },
   detail: {
-    preSimplifyTol: 0.03,   // Same as overview for consistency
-    useBuffer: true,        // Use buffer for curved edges
-    bufferOut: 60,          // Same as overview
-    bufferIn: 55,           // Same as overview
-    bufferSteps: 48,        // Same high step count for curves
-    postSimplifyTol: 0.001, // Same minimal simplification
-    minAreaKm2: 500,        // Same min area
+    preSimplifyTol: 0.005,  // Same as overview for consistency
+    useBuffer: true,        // USE buffer for rounding
+    bufferOut: 40,          // Same symmetric buffer
+    bufferIn: 40,           // Same symmetric buffer
+    bufferSteps: 48,        // Same high step count
+    densifyMaxSegment: 15,  // Same densification
+    densifyInterval: 4,     // Same interval
+    postSimplifyTol: 0.0005, // Same minimal post-simplification
+    minAreaKm2: 400,        // Same min area
   },
 };
 
@@ -247,6 +250,99 @@ function safeDifference(a: PolygonFeature | null, b: PolygonFeature | null): Pol
   } catch {
     return a;
   }
+}
+
+/**
+ * Calculate distance between two points in kilometers (Haversine formula)
+ */
+function distanceKm(p1: Position, p2: Position): number {
+  const R = 6371; // Earth's radius in km
+  const lat1 = p1[1] * Math.PI / 180;
+  const lat2 = p2[1] * Math.PI / 180;
+  const dLat = (p2[1] - p1[1]) * Math.PI / 180;
+  const dLon = (p2[0] - p1[0]) * Math.PI / 180;
+
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1) * Math.cos(lat2) *
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+  return R * c;
+}
+
+/**
+ * Interpolate between two points
+ */
+function interpolatePoint(p1: Position, p2: Position, t: number): Position {
+  return [
+    p1[0] + (p2[0] - p1[0]) * t,
+    p1[1] + (p2[1] - p1[1]) * t,
+  ];
+}
+
+/**
+ * Densify a ring by inserting points along long segments
+ * This prevents visible straight edges after buffering
+ */
+function densifyRing(ring: Position[], maxSegmentKm: number, intervalKm: number): Position[] {
+  if (ring.length < 2) return ring;
+
+  const result: Position[] = [];
+
+  for (let i = 0; i < ring.length - 1; i++) {
+    const p1 = ring[i];
+    const p2 = ring[i + 1];
+
+    result.push(p1);
+
+    const dist = distanceKm(p1, p2);
+
+    if (dist > maxSegmentKm) {
+      // Insert points along this segment
+      const numPoints = Math.ceil(dist / intervalKm) - 1;
+      for (let j = 1; j <= numPoints; j++) {
+        const t = j / (numPoints + 1);
+        result.push(interpolatePoint(p1, p2, t));
+      }
+    }
+  }
+
+  // Add closing point
+  result.push(ring[ring.length - 1]);
+
+  return result;
+}
+
+/**
+ * Densify a geometry by inserting points along long straight segments
+ * This kills long straight chords that appear after buffering
+ */
+function densifyGeometry(feature: PolygonFeature, maxSegmentKm: number, intervalKm: number): PolygonFeature {
+  const geom = feature.geometry;
+
+  if (geom.type === 'Polygon') {
+    const densifiedCoords = geom.coordinates.map(ring =>
+      densifyRing(ring, maxSegmentKm, intervalKm)
+    );
+
+    return {
+      ...feature,
+      geometry: { type: 'Polygon', coordinates: densifiedCoords },
+    };
+  }
+
+  if (geom.type === 'MultiPolygon') {
+    const densifiedCoords = geom.coordinates.map(poly =>
+      poly.map(ring => densifyRing(ring, maxSegmentKm, intervalKm))
+    );
+
+    return {
+      ...feature,
+      geometry: { type: 'MultiPolygon', coordinates: densifiedCoords },
+    };
+  }
+
+  return feature;
 }
 
 /**
@@ -654,8 +750,7 @@ function processWSSIData(
       // Continue with original
     }
 
-    // Step 2: Morphological smoothing (buffer out then in) - ONLY for detail
-    // Skip for overview to avoid timeout
+    // Step 2: Morphological smoothing (buffer out then in)
     if ('useBuffer' in params && params.useBuffer && 'bufferOut' in params) {
       const smoothed = morphologicalSmooth(
         band,
@@ -666,6 +761,19 @@ function processWSSIData(
       if (smoothed) {
         band = smoothed;
       }
+    }
+
+    // Step 2.5: DENSIFY after buffer to kill long straight chords
+    // This inserts points along segments > maxSegmentKm every intervalKm
+    if ('densifyMaxSegment' in params && 'densifyInterval' in params) {
+      const beforeDensify = countGeometry(band).vertices;
+      band = densifyGeometry(
+        band,
+        params.densifyMaxSegment as number,
+        params.densifyInterval as number
+      );
+      const afterDensify = countGeometry(band).vertices;
+      console.log(`[WSSI] Densified ${category}: ${beforeDensify} -> ${afterDensify} vertices`);
     }
 
     // Step 3: Remove small fragments early
