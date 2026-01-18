@@ -62,22 +62,25 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters - ULTRA FAST settings
-// Skip buffer entirely for overview (just simplify), light buffer for detail
+// Smoothing parameters
+// Use buffer smoothing on ALL resolutions to fill gaps and smooth edges
 const SMOOTH_PARAMS = {
   overview: {
-    preSimplifyTol: 0.05,  // Aggressive pre-simplification
-    useBuffer: false,      // SKIP buffer for overview - too slow
-    postSimplifyTol: 0.08, // Moderate final simplification
-    minAreaKm2: 500,       // Min 500 km²
+    preSimplifyTol: 0.03,  // Moderate pre-simplification
+    useBuffer: true,       // USE buffer to fill gaps and smooth
+    bufferOut: 3,          // 3km buffer out (expand to fill gaps)
+    bufferIn: 1.5,         // 1.5km buffer in (less than out = net expansion for overlap)
+    bufferSteps: 8,        // Good quality
+    postSimplifyTol: 0.05, // Moderate final simplification
+    minAreaKm2: 200,       // Min 200 km²
   },
   detail: {
-    preSimplifyTol: 0.015, // Light pre-simplification
-    useBuffer: true,       // Only use buffer for detail
-    bufferOut: 5,          // Small buffer 5km
-    bufferIn: 5,           // Small buffer 5km
-    bufferSteps: 6,        // Minimal steps
-    postSimplifyTol: 0.02, // Light final simplification
+    preSimplifyTol: 0.01,  // Light pre-simplification
+    useBuffer: true,       // Use buffer to fill gaps and smooth
+    bufferOut: 2,          // 2km buffer out
+    bufferIn: 1,           // 1km buffer in (net 1km expansion for overlap)
+    bufferSteps: 12,       // Higher quality for detail
+    postSimplifyTol: 0.015, // Light final simplification
     minAreaKm2: 50,        // Min 50 km²
   },
 };
@@ -246,7 +249,8 @@ function safeDifference(a: PolygonFeature | null, b: PolygonFeature | null): Pol
 
 /**
  * Apply morphological smoothing: buffer out then buffer in
- * This eliminates jagged stair-step edges
+ * This eliminates jagged stair-step edges and fills small gaps
+ * Using asymmetric buffer (more out than in) creates slight overlap between bands
  */
 function morphologicalSmooth(
   feature: PolygonFeature,
@@ -255,21 +259,34 @@ function morphologicalSmooth(
   steps: number
 ): PolygonFeature | null {
   try {
-    // Buffer OUT (dilate) - expands the polygon, filling in jagged edges
+    console.log(`[WSSI] morphologicalSmooth: out=${bufferOutKm}km, in=${bufferInKm}km, steps=${steps}`);
+
+    // Buffer OUT (dilate) - expands the polygon, filling in jagged edges and small gaps
     const bufferedOut = turf.buffer(feature, bufferOutKm, {
       units: 'kilometers',
       steps: steps,
     });
 
-    if (!bufferedOut?.geometry) return feature;
+    if (!bufferedOut?.geometry) {
+      console.warn('[WSSI] morphologicalSmooth: buffer out returned null');
+      return feature;
+    }
 
     // Buffer IN (erode) - contracts back, now with smooth edges
+    // Using less than bufferOut creates net expansion for overlap
     const bufferedIn = turf.buffer(bufferedOut, -bufferInKm, {
       units: 'kilometers',
       steps: steps,
     });
 
-    if (!bufferedIn?.geometry) return feature;
+    if (!bufferedIn?.geometry) {
+      console.warn('[WSSI] morphologicalSmooth: buffer in returned null');
+      return feature;
+    }
+
+    const beforeVerts = countGeometry(feature).vertices;
+    const afterVerts = countGeometry(bufferedIn as PolygonFeature).vertices;
+    console.log(`[WSSI] morphologicalSmooth: ${beforeVerts} -> ${afterVerts} vertices`);
 
     return bufferedIn as PolygonFeature;
   } catch (err) {
@@ -599,7 +616,9 @@ function processWSSIData(
   }
 
   // Union features within each category (dissolve)
-  const unionedByCategory: Record<WSSICategory, PolygonFeature | null> = {
+  // NO SUBTRACTION - keep full extents so bands overlap naturally
+  // Higher severity bands render on top of lower severity bands
+  const bands: Record<WSSICategory, PolygonFeature | null> = {
     elevated: safeUnion(featuresByCategory.elevated),
     minor: safeUnion(featuresByCategory.minor),
     moderate: safeUnion(featuresByCategory.moderate),
@@ -607,23 +626,7 @@ function processWSSIData(
     extreme: safeUnion(featuresByCategory.extreme),
   };
 
-  // Build exclusive bands (subtract higher severity from lower)
-  const bandExtreme = unionedByCategory.extreme;
-  const bandMajor = safeDifference(unionedByCategory.major, bandExtreme);
-  const majorAndExtreme = safeUnion([bandMajor, bandExtreme].filter(Boolean) as PolygonFeature[]);
-  const bandModerate = safeDifference(unionedByCategory.moderate, majorAndExtreme);
-  const modMajExt = safeUnion([bandModerate, bandMajor, bandExtreme].filter(Boolean) as PolygonFeature[]);
-  const bandMinor = safeDifference(unionedByCategory.minor, modMajExt);
-  const minModMajExt = safeUnion([bandMinor, bandModerate, bandMajor, bandExtreme].filter(Boolean) as PolygonFeature[]);
-  const bandElevated = safeDifference(unionedByCategory.elevated, minModMajExt);
-
-  const exclusiveBands: Record<WSSICategory, PolygonFeature | null> = {
-    elevated: bandElevated,
-    minor: bandMinor,
-    moderate: bandModerate,
-    major: bandMajor,
-    extreme: bandExtreme,
-  };
+  console.log(`[WSSI] Dissolved bands - elevated:${bands.elevated ? 'yes' : 'no'}, minor:${bands.minor ? 'yes' : 'no'}, moderate:${bands.moderate ? 'yes' : 'no'}, major:${bands.major ? 'yes' : 'no'}, extreme:${bands.extreme ? 'yes' : 'no'}`);
 
   // Process each band with full geometry sanitization pipeline
   const processedFeatures: Feature[] = [];
@@ -631,7 +634,7 @@ function processWSSIData(
   let totalComponents = 0;
 
   for (const category of CATEGORY_ORDER) {
-    let band = exclusiveBands[category];
+    let band = bands[category];
     if (!band?.geometry) continue;
 
     // Step 1: PRE-SIMPLIFY aggressively to reduce vertices BEFORE buffer
