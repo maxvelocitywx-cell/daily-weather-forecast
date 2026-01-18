@@ -348,123 +348,178 @@ function jstsBuffer(jstsGeom: ReturnType<typeof geoJsonReader.read>, distanceMet
 }
 
 /**
- * Safe buffer that returns original geometry if buffer would erase it
+ * Apply smoothing using Turf.js buffer (works in WGS84)
+ * Much more robust than JSTS for this use case
+ * Pipeline: pre-simplify -> buffer out/in -> densify -> post-simplify
  */
-function safeJstsBuffer(
-  jstsGeom: ReturnType<typeof geoJsonReader.read>,
-  distanceMeters: number,
-  steps: number,
-  label: string
-): ReturnType<typeof geoJsonReader.read> {
-  const result = jstsBuffer(jstsGeom, distanceMeters, steps);
-  if (result.isEmpty()) {
-    console.warn(`[WSSI] ${label} buffer(${distanceMeters}m) would erase geometry, keeping original`);
-    return jstsGeom;
+function smoothGeometryWithTurf(
+  feature: PolygonFeature,
+  params: typeof SMOOTH_PARAMS.overview
+): PolygonFeature | null {
+  try {
+    let result = feature;
+    const startVertices = countGeometry(feature).vertices;
+    console.log(`[WSSI] smoothGeometryWithTurf START: ${startVertices} vertices`);
+
+    // Step 1: PRE-SIMPLIFY (light - just remove stair-steps)
+    // Convert meters to degrees (rough approximation: 1 degree ≈ 111km)
+    const preSimplifyDegrees = params.preSimplifyMeters / 111000;
+    try {
+      const simplified = turf.simplify(result, {
+        tolerance: preSimplifyDegrees,
+        highQuality: false,
+        mutate: false,
+      });
+      if (simplified?.geometry) {
+        result = simplified as PolygonFeature;
+      }
+    } catch (e) {
+      console.warn('[WSSI] Pre-simplify failed:', e);
+    }
+    console.log(`[WSSI] After pre-simplify: ${countGeometry(result).vertices} vertices`);
+
+    // Step 2: BUFFER OUT (expand) - use kilometers for turf
+    const bufferOutKm = params.buffer1OutMeters / 1000;
+    try {
+      const bufferedOut = turf.buffer(result, bufferOutKm, {
+        units: 'kilometers',
+        steps: params.buffer1Steps,
+      });
+      if (bufferedOut?.geometry) {
+        result = bufferedOut as PolygonFeature;
+        console.log(`[WSSI] After buffer OUT (${bufferOutKm}km): ${countGeometry(result).vertices} vertices`);
+      }
+    } catch (e) {
+      console.warn('[WSSI] Buffer OUT failed:', e);
+    }
+
+    // Step 3: BUFFER IN (contract back) - symmetric for pure rounding
+    const bufferInKm = params.buffer1InMeters / 1000;
+    try {
+      const bufferedIn = turf.buffer(result, -bufferInKm, {
+        units: 'kilometers',
+        steps: params.buffer1Steps,
+      });
+      if (bufferedIn?.geometry) {
+        result = bufferedIn as PolygonFeature;
+        console.log(`[WSSI] After buffer IN (${bufferInKm}km): ${countGeometry(result).vertices} vertices`);
+      }
+    } catch (e) {
+      console.warn('[WSSI] Buffer IN failed:', e);
+    }
+
+    // Step 4: Second buffer pass (smaller refinement)
+    const buffer2OutKm = params.buffer2OutMeters / 1000;
+    const buffer2InKm = params.buffer2InMeters / 1000;
+    try {
+      const bufferedOut2 = turf.buffer(result, buffer2OutKm, {
+        units: 'kilometers',
+        steps: params.buffer2Steps,
+      });
+      if (bufferedOut2?.geometry) {
+        result = bufferedOut2 as PolygonFeature;
+      }
+      const bufferedIn2 = turf.buffer(result, -buffer2InKm, {
+        units: 'kilometers',
+        steps: params.buffer2Steps,
+      });
+      if (bufferedIn2?.geometry) {
+        result = bufferedIn2 as PolygonFeature;
+      }
+      console.log(`[WSSI] After buffer pass 2: ${countGeometry(result).vertices} vertices`);
+    } catch (e) {
+      console.warn('[WSSI] Buffer pass 2 failed:', e);
+    }
+
+    // Step 5: DENSIFY - break up long straight segments
+    // Convert meters to degrees for the densification
+    const maxSegmentDeg = params.densifyMaxSegmentMeters / 111000;
+    const intervalDeg = params.densifyIntervalMeters / 111000;
+    result = densifyFeatureWGS84(result, maxSegmentDeg, intervalDeg);
+    console.log(`[WSSI] After densify: ${countGeometry(result).vertices} vertices`);
+
+    // Step 6: POST-SIMPLIFY (very light to preserve curves)
+    const postSimplifyDegrees = params.postSimplifyMeters / 111000;
+    try {
+      const postSimplified = turf.simplify(result, {
+        tolerance: postSimplifyDegrees,
+        highQuality: true,
+        mutate: false,
+      });
+      if (postSimplified?.geometry) {
+        result = postSimplified as PolygonFeature;
+      }
+    } catch (e) {
+      console.warn('[WSSI] Post-simplify failed:', e);
+    }
+    console.log(`[WSSI] After post-simplify: ${countGeometry(result).vertices} vertices`);
+
+    console.log(`[WSSI] smoothGeometryWithTurf COMPLETE: ${startVertices} -> ${countGeometry(result).vertices} vertices`);
+    return result;
+  } catch (err) {
+    console.error('[WSSI] smoothGeometryWithTurf failed:', err);
+    return null;
   }
-  console.log(`[WSSI] ${label} (${distanceMeters}m): ${jstsGeom.getNumPoints()} -> ${result.getNumPoints()} vertices`);
-  return result;
 }
 
 /**
- * Apply full smoothing pipeline in EPSG:3857 (meters)
- * Pipeline: pre-simplify -> buffer1 out/in -> buffer2 out/in -> densify -> post-simplify
+ * Densify a feature in WGS84 coordinates (degrees)
  */
-function smoothGeometryIn3857(
-  mercatorGeom: Polygon | MultiPolygon,
-  params: typeof SMOOTH_PARAMS.overview
-): Polygon | MultiPolygon | null {
-  try {
-    let jstsGeom = geoJsonReader.read(mercatorGeom);
-    const startVertices = jstsGeom.getNumPoints();
-    console.log(`[WSSI] smoothGeometryIn3857 START: ${startVertices} vertices`);
+function densifyFeatureWGS84(feature: PolygonFeature, maxSegmentDeg: number, intervalDeg: number): PolygonFeature {
+  const geom = feature.geometry;
 
-    // Step 1: PRE-SIMPLIFY in meters (light - just remove stair-steps)
-    const preSimplifier = new TopologyPreservingSimplifier(jstsGeom);
-    preSimplifier.setDistanceTolerance(params.preSimplifyMeters);
-    const simplified = preSimplifier.getResultGeometry();
-    if (!simplified.isEmpty()) {
-      jstsGeom = simplified;
+  const densifyRingWGS84 = (ring: Position[]): Position[] => {
+    if (ring.length < 2) return ring;
+    const result: Position[] = [];
+
+    for (let i = 0; i < ring.length - 1; i++) {
+      const p1 = ring[i];
+      const p2 = ring[i + 1];
+      result.push(p1);
+
+      // Calculate distance in degrees (rough approximation)
+      const dx = p2[0] - p1[0];
+      const dy = p2[1] - p1[1];
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist > maxSegmentDeg) {
+        const numPoints = Math.ceil(dist / intervalDeg) - 1;
+        for (let j = 1; j <= numPoints; j++) {
+          const t = j / (numPoints + 1);
+          result.push([
+            p1[0] + (p2[0] - p1[0]) * t,
+            p1[1] + (p2[1] - p1[1]) * t,
+          ]);
+        }
+      }
     }
-    console.log(`[WSSI] After pre-simplify (${params.preSimplifyMeters}m): ${jstsGeom.getNumPoints()} vertices`);
+    result.push(ring[ring.length - 1]);
+    return result;
+  };
 
-    // Make valid after simplify
-    if (!jstsGeom.isValid()) {
-      jstsGeom = jstsGeom.buffer(0);
-    }
-    if (jstsGeom.isEmpty()) {
-      console.warn('[WSSI] Geometry empty after pre-simplify validation');
-      return null;
-    }
-
-    // Step 2: FIRST BUFFER PASS (symmetric rounding)
-    // Buffer OUT then IN - use safe version to avoid erasing small polygons
-    jstsGeom = safeJstsBuffer(jstsGeom, params.buffer1OutMeters, params.buffer1Steps, 'buffer1 OUT');
-    jstsGeom = safeJstsBuffer(jstsGeom, -params.buffer1InMeters, params.buffer1Steps, 'buffer1 IN');
-
-    // Step 3: SECOND BUFFER PASS (smaller refinement)
-    jstsGeom = safeJstsBuffer(jstsGeom, params.buffer2OutMeters, params.buffer2Steps, 'buffer2 OUT');
-    jstsGeom = safeJstsBuffer(jstsGeom, -params.buffer2InMeters, params.buffer2Steps, 'buffer2 IN');
-
-    // Make valid after buffers
-    if (!jstsGeom.isValid()) {
-      jstsGeom = jstsGeom.buffer(0);
-    }
-    if (jstsGeom.isEmpty()) {
-      console.warn('[WSSI] Geometry empty after buffer validation');
-      return null;
-    }
-
-    // Convert back to GeoJSON for densification
-    const writtenGeom = geoJsonWriter.write(jstsGeom);
-    if (writtenGeom.type !== 'Polygon' && writtenGeom.type !== 'MultiPolygon') {
-      console.warn('[WSSI] Buffer result not polygon, type:', writtenGeom.type);
-      return null;
-    }
-    let resultGeom = writtenGeom as Polygon | MultiPolygon;
-
-    // Step 4: DENSIFY after buffer to kill long straight chords
-    const beforeDensify = jstsGeom.getNumPoints();
-    resultGeom = densifyGeometryMeters(
-      resultGeom,
-      params.densifyMaxSegmentMeters,
-      params.densifyIntervalMeters
-    );
-
-    // Read back for post-simplify
-    jstsGeom = geoJsonReader.read(resultGeom);
-    console.log(`[WSSI] After densify (max ${params.densifyMaxSegmentMeters}m, interval ${params.densifyIntervalMeters}m): ${beforeDensify} -> ${jstsGeom.getNumPoints()} vertices`);
-
-    // Step 5: POST-SIMPLIFY (very light to preserve curves)
-    const postSimplifier = new TopologyPreservingSimplifier(jstsGeom);
-    postSimplifier.setDistanceTolerance(params.postSimplifyMeters);
-    const postSimplified = postSimplifier.getResultGeometry();
-    if (!postSimplified.isEmpty()) {
-      jstsGeom = postSimplified;
-    }
-    console.log(`[WSSI] After post-simplify (${params.postSimplifyMeters}m): ${jstsGeom.getNumPoints()} vertices`);
-
-    // Final validation
-    if (!jstsGeom.isValid()) {
-      jstsGeom = jstsGeom.buffer(0);
-    }
-    if (jstsGeom.isEmpty()) {
-      console.warn('[WSSI] Geometry empty after final validation');
-      return null;
-    }
-
-    const finalGeom = geoJsonWriter.write(jstsGeom);
-    if (finalGeom.type !== 'Polygon' && finalGeom.type !== 'MultiPolygon') {
-      console.warn('[WSSI] Final result not polygon, type:', finalGeom.type);
-      return null;
-    }
-    resultGeom = finalGeom as Polygon | MultiPolygon;
-
-    console.log(`[WSSI] smoothGeometryIn3857 COMPLETE: ${startVertices} -> ${jstsGeom.getNumPoints()} vertices`);
-    return resultGeom;
-  } catch (err) {
-    console.error('[WSSI] smoothGeometryIn3857 failed:', err);
-    return null;
+  if (geom.type === 'Polygon') {
+    return {
+      ...feature,
+      geometry: {
+        type: 'Polygon',
+        coordinates: geom.coordinates.map(densifyRingWGS84),
+      },
+    };
   }
+
+  if (geom.type === 'MultiPolygon') {
+    return {
+      ...feature,
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: geom.coordinates.map(poly =>
+          poly.map(densifyRingWGS84)
+        ),
+      },
+    };
+  }
+
+  return feature;
 }
 
 /**
@@ -811,28 +866,19 @@ function processWSSIData(
 
     console.log(`[WSSI] Processing ${category}...`);
 
-    // === NEW PIPELINE: ALL OPERATIONS IN EPSG:3857 (METERS) ===
+    // === SMOOTHING PIPELINE USING TURF.JS (WGS84) ===
+    // This is more robust than JSTS with EPSG:3857
 
-    // Step 1: Reproject to EPSG:3857
-    const mercatorGeom = reprojectGeometry(band.geometry, true);
-
-    // Step 2: Apply full smoothing pipeline in EPSG:3857
-    const smoothedMercator = smoothGeometryIn3857(mercatorGeom, params);
-    if (!smoothedMercator) {
+    // Apply smoothing with buffer operations
+    const smoothedBandResult = smoothGeometryWithTurf(band, params);
+    if (!smoothedBandResult) {
       console.warn(`[WSSI] Skipping ${category} - smoothing returned null`);
       continue;
     }
 
-    // Step 3: Reproject back to EPSG:4326
-    const smoothedWGS84 = reprojectGeometry(smoothedMercator, false);
+    let smoothedBand = smoothedBandResult;
 
-    // Create feature with smoothed geometry
-    let smoothedBand: PolygonFeature = {
-      ...band,
-      geometry: smoothedWGS84,
-    };
-
-    // Step 4: Remove small fragments
+    // Remove small fragments
     const fragCleaned = removeSmallFragments(smoothedBand, params.minAreaKm2);
     if (!fragCleaned) {
       console.warn(`[WSSI] Skipping ${category} - too small after smoothing`);
