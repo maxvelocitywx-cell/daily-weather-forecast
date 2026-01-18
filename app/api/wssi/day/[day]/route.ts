@@ -64,19 +64,20 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
 
 // Smoothing parameters - ALL VALUES IN METERS (EPSG:3857)
 // Pipeline: reproject to 3857 -> pre-simplify -> two-pass buffer -> densify -> post-simplify -> reproject to 4326
+// NOTE: Buffer distances must be small enough that polygons survive the inward buffer!
 const SMOOTH_PARAMS = {
   // Use same params for both resolutions to ensure consistent appearance at all zooms
   overview: {
     // Pre-simplify: only remove stair-steps, NOT reshape (2-5km max)
     preSimplifyMeters: 3000,        // 3km - light, just removes grid artifacts
-    // First buffer pass: large symmetric rounding
-    buffer1OutMeters: 40000,        // 40km out
-    buffer1InMeters: 40000,         // 40km in (symmetric = pure rounding)
-    buffer1Steps: 48,               // High step count for smooth arcs
+    // First buffer pass: symmetric rounding (reduced from 40km to avoid erasing small polygons)
+    buffer1OutMeters: 15000,        // 15km out
+    buffer1InMeters: 15000,         // 15km in (symmetric = pure rounding)
+    buffer1Steps: 32,               // High step count for smooth arcs
     // Second buffer pass: smaller refinement
-    buffer2OutMeters: 12000,        // 12km out
-    buffer2InMeters: 12000,         // 12km in
-    buffer2Steps: 48,               // Same high step count
+    buffer2OutMeters: 8000,         // 8km out
+    buffer2InMeters: 8000,          // 8km in
+    buffer2Steps: 32,               // Same high step count
     // Densification: kill long straight segments AFTER buffer
     densifyMaxSegmentMeters: 8000,  // Max 8km segment length
     densifyIntervalMeters: 2000,    // Insert points every 2km
@@ -86,12 +87,12 @@ const SMOOTH_PARAMS = {
   },
   detail: {
     preSimplifyMeters: 3000,
-    buffer1OutMeters: 40000,
-    buffer1InMeters: 40000,
-    buffer1Steps: 48,
-    buffer2OutMeters: 12000,
-    buffer2InMeters: 12000,
-    buffer2Steps: 48,
+    buffer1OutMeters: 15000,
+    buffer1InMeters: 15000,
+    buffer1Steps: 32,
+    buffer2OutMeters: 8000,
+    buffer2InMeters: 8000,
+    buffer2Steps: 32,
     densifyMaxSegmentMeters: 8000,
     densifyIntervalMeters: 2000,
     postSimplifyMeters: 1000,
@@ -347,6 +348,24 @@ function jstsBuffer(jstsGeom: ReturnType<typeof geoJsonReader.read>, distanceMet
 }
 
 /**
+ * Safe buffer that returns original geometry if buffer would erase it
+ */
+function safeJstsBuffer(
+  jstsGeom: ReturnType<typeof geoJsonReader.read>,
+  distanceMeters: number,
+  steps: number,
+  label: string
+): ReturnType<typeof geoJsonReader.read> {
+  const result = jstsBuffer(jstsGeom, distanceMeters, steps);
+  if (result.isEmpty()) {
+    console.warn(`[WSSI] ${label} buffer(${distanceMeters}m) would erase geometry, keeping original`);
+    return jstsGeom;
+  }
+  console.log(`[WSSI] ${label} (${distanceMeters}m): ${jstsGeom.getNumPoints()} -> ${result.getNumPoints()} vertices`);
+  return result;
+}
+
+/**
  * Apply full smoothing pipeline in EPSG:3857 (meters)
  * Pipeline: pre-simplify -> buffer1 out/in -> buffer2 out/in -> densify -> post-simplify
  */
@@ -362,46 +381,46 @@ function smoothGeometryIn3857(
     // Step 1: PRE-SIMPLIFY in meters (light - just remove stair-steps)
     const preSimplifier = new TopologyPreservingSimplifier(jstsGeom);
     preSimplifier.setDistanceTolerance(params.preSimplifyMeters);
-    jstsGeom = preSimplifier.getResultGeometry();
+    const simplified = preSimplifier.getResultGeometry();
+    if (!simplified.isEmpty()) {
+      jstsGeom = simplified;
+    }
     console.log(`[WSSI] After pre-simplify (${params.preSimplifyMeters}m): ${jstsGeom.getNumPoints()} vertices`);
 
     // Make valid after simplify
     if (!jstsGeom.isValid()) {
       jstsGeom = jstsGeom.buffer(0);
     }
-    if (jstsGeom.isEmpty()) return null;
+    if (jstsGeom.isEmpty()) {
+      console.warn('[WSSI] Geometry empty after pre-simplify validation');
+      return null;
+    }
 
-    // Step 2: FIRST BUFFER PASS (large symmetric rounding)
-    // Buffer OUT
-    jstsGeom = jstsBuffer(jstsGeom, params.buffer1OutMeters, params.buffer1Steps);
-    console.log(`[WSSI] After buffer1 OUT (${params.buffer1OutMeters}m): ${jstsGeom.getNumPoints()} vertices`);
-    if (jstsGeom.isEmpty()) return null;
-
-    // Buffer IN (same distance = pure rounding, no net size change)
-    jstsGeom = jstsBuffer(jstsGeom, -params.buffer1InMeters, params.buffer1Steps);
-    console.log(`[WSSI] After buffer1 IN (${params.buffer1InMeters}m): ${jstsGeom.getNumPoints()} vertices`);
-    if (jstsGeom.isEmpty()) return null;
+    // Step 2: FIRST BUFFER PASS (symmetric rounding)
+    // Buffer OUT then IN - use safe version to avoid erasing small polygons
+    jstsGeom = safeJstsBuffer(jstsGeom, params.buffer1OutMeters, params.buffer1Steps, 'buffer1 OUT');
+    jstsGeom = safeJstsBuffer(jstsGeom, -params.buffer1InMeters, params.buffer1Steps, 'buffer1 IN');
 
     // Step 3: SECOND BUFFER PASS (smaller refinement)
-    jstsGeom = jstsBuffer(jstsGeom, params.buffer2OutMeters, params.buffer2Steps);
-    console.log(`[WSSI] After buffer2 OUT (${params.buffer2OutMeters}m): ${jstsGeom.getNumPoints()} vertices`);
-    if (jstsGeom.isEmpty()) return null;
-
-    jstsGeom = jstsBuffer(jstsGeom, -params.buffer2InMeters, params.buffer2Steps);
-    console.log(`[WSSI] After buffer2 IN (${params.buffer2InMeters}m): ${jstsGeom.getNumPoints()} vertices`);
-    if (jstsGeom.isEmpty()) return null;
+    jstsGeom = safeJstsBuffer(jstsGeom, params.buffer2OutMeters, params.buffer2Steps, 'buffer2 OUT');
+    jstsGeom = safeJstsBuffer(jstsGeom, -params.buffer2InMeters, params.buffer2Steps, 'buffer2 IN');
 
     // Make valid after buffers
     if (!jstsGeom.isValid()) {
       jstsGeom = jstsGeom.buffer(0);
     }
-
-    // Convert back to GeoJSON for densification
-    let resultGeom = geoJsonWriter.write(jstsGeom) as Polygon | MultiPolygon;
-    if (resultGeom.type !== 'Polygon' && resultGeom.type !== 'MultiPolygon') {
-      console.warn('[WSSI] Buffer result not polygon');
+    if (jstsGeom.isEmpty()) {
+      console.warn('[WSSI] Geometry empty after buffer validation');
       return null;
     }
+
+    // Convert back to GeoJSON for densification
+    const writtenGeom = geoJsonWriter.write(jstsGeom);
+    if (writtenGeom.type !== 'Polygon' && writtenGeom.type !== 'MultiPolygon') {
+      console.warn('[WSSI] Buffer result not polygon, type:', writtenGeom.type);
+      return null;
+    }
+    let resultGeom = writtenGeom as Polygon | MultiPolygon;
 
     // Step 4: DENSIFY after buffer to kill long straight chords
     const beforeDensify = jstsGeom.getNumPoints();
@@ -418,19 +437,27 @@ function smoothGeometryIn3857(
     // Step 5: POST-SIMPLIFY (very light to preserve curves)
     const postSimplifier = new TopologyPreservingSimplifier(jstsGeom);
     postSimplifier.setDistanceTolerance(params.postSimplifyMeters);
-    jstsGeom = postSimplifier.getResultGeometry();
+    const postSimplified = postSimplifier.getResultGeometry();
+    if (!postSimplified.isEmpty()) {
+      jstsGeom = postSimplified;
+    }
     console.log(`[WSSI] After post-simplify (${params.postSimplifyMeters}m): ${jstsGeom.getNumPoints()} vertices`);
 
     // Final validation
     if (!jstsGeom.isValid()) {
       jstsGeom = jstsGeom.buffer(0);
     }
-    if (jstsGeom.isEmpty()) return null;
-
-    resultGeom = geoJsonWriter.write(jstsGeom) as Polygon | MultiPolygon;
-    if (resultGeom.type !== 'Polygon' && resultGeom.type !== 'MultiPolygon') {
+    if (jstsGeom.isEmpty()) {
+      console.warn('[WSSI] Geometry empty after final validation');
       return null;
     }
+
+    const finalGeom = geoJsonWriter.write(jstsGeom);
+    if (finalGeom.type !== 'Polygon' && finalGeom.type !== 'MultiPolygon') {
+      console.warn('[WSSI] Final result not polygon, type:', finalGeom.type);
+      return null;
+    }
+    resultGeom = finalGeom as Polygon | MultiPolygon;
 
     console.log(`[WSSI] smoothGeometryIn3857 COMPLETE: ${startVertices} -> ${jstsGeom.getNumPoints()} vertices`);
     return resultGeom;
