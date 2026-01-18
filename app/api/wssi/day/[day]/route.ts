@@ -63,25 +63,26 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
 };
 
 // Smoothing parameters
-// Use buffer smoothing on ALL resolutions to fill gaps and smooth edges
+// Use buffer smoothing to create ROUNDED corners (min 25 mile / 40km radius)
+// Larger buffer = rounder corners, more steps = smoother arcs
 const SMOOTH_PARAMS = {
   overview: {
-    preSimplifyTol: 0.03,  // Moderate pre-simplification
-    useBuffer: true,       // USE buffer to fill gaps and smooth
-    bufferOut: 3,          // 3km buffer out (expand to fill gaps)
-    bufferIn: 1.5,         // 1.5km buffer in (less than out = net expansion for overlap)
-    bufferSteps: 8,        // Good quality
-    postSimplifyTol: 0.05, // Moderate final simplification
-    minAreaKm2: 200,       // Min 200 km²
+    preSimplifyTol: 0.02,  // Moderate pre-simplification
+    useBuffer: true,       // USE buffer for rounded corners
+    bufferOut: 45,         // 45km buffer out (~28 miles) - creates rounded corners
+    bufferIn: 40,          // 40km buffer in - net 5km expansion for overlap
+    bufferSteps: 16,       // High step count for smooth arcs
+    postSimplifyTol: 0.03, // Light final simplification to preserve curves
+    minAreaKm2: 500,       // Min 500 km² (larger to remove noise)
   },
   detail: {
-    preSimplifyTol: 0.01,  // Light pre-simplification
-    useBuffer: true,       // Use buffer to fill gaps and smooth
-    bufferOut: 2,          // 2km buffer out
-    bufferIn: 1,           // 1km buffer in (net 1km expansion for overlap)
-    bufferSteps: 12,       // Higher quality for detail
-    postSimplifyTol: 0.015, // Light final simplification
-    minAreaKm2: 50,        // Min 50 km²
+    preSimplifyTol: 0.008, // Light pre-simplification
+    useBuffer: true,       // Use buffer for rounded corners
+    bufferOut: 42,         // 42km buffer out (~26 miles) - creates rounded corners
+    bufferIn: 38,          // 38km buffer in - net 4km expansion for overlap
+    bufferSteps: 24,       // Higher step count for smoother arcs in detail
+    postSimplifyTol: 0.012, // Very light simplification to preserve curves
+    minAreaKm2: 200,       // Min 200 km²
   },
 };
 
