@@ -62,28 +62,28 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters - balanced smoothing that completes within timeout
-// Use buffer smoothing to create rounded corners without sharp angles
-// Pre-simplify more aggressively to reduce computation, then smooth
+// Smoothing parameters - CURVED edges, not lines
+// Heavy pre-simplification + high buffer steps = smooth curves that compute fast
+// The key is simplifying BEFORE buffering, then using many buffer segments
 const SMOOTH_PARAMS = {
   // Use same params for both resolutions to ensure consistent appearance at all zooms
   overview: {
-    preSimplifyTol: 0.015,  // More aggressive pre-simplification to speed up buffer ops
-    useBuffer: true,        // USE buffer for rounded corners
-    bufferOut: 50,          // 50km buffer out (~31 miles) - good rounding
-    bufferIn: 45,           // 45km buffer in - net 5km expansion for overlap
-    bufferSteps: 24,        // Moderate step count - still smooth but faster
-    postSimplifyTol: 0.005, // Light final simplification
-    minAreaKm2: 400,        // Min 400 km² to remove small features early
+    preSimplifyTol: 0.03,   // Heavy pre-simplification - reduces points before expensive buffer
+    useBuffer: true,        // USE buffer for curved edges
+    bufferOut: 60,          // 60km buffer out (~37 miles) - creates curved edges
+    bufferIn: 55,           // 55km buffer in - net 5km expansion
+    bufferSteps: 48,        // HIGH step count - more segments = smoother curves
+    postSimplifyTol: 0.001, // Minimal post-simplification to keep curves smooth
+    minAreaKm2: 500,        // Min 500 km² to remove small features
   },
   detail: {
-    preSimplifyTol: 0.015,  // Same as overview for consistency
-    useBuffer: true,        // Use buffer for rounded corners
-    bufferOut: 50,          // Same as overview - 50km buffer out
-    bufferIn: 45,           // Same as overview - 45km buffer in
-    bufferSteps: 24,        // Same moderate step count
-    postSimplifyTol: 0.005, // Same light simplification
-    minAreaKm2: 400,        // Same min area
+    preSimplifyTol: 0.03,   // Same as overview for consistency
+    useBuffer: true,        // Use buffer for curved edges
+    bufferOut: 60,          // Same as overview
+    bufferIn: 55,           // Same as overview
+    bufferSteps: 48,        // Same high step count for curves
+    postSimplifyTol: 0.001, // Same minimal simplification
+    minAreaKm2: 500,        // Same min area
   },
 };
 
