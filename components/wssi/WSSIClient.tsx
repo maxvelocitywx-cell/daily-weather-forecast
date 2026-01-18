@@ -11,8 +11,8 @@ mapboxgl.accessToken = MAPBOX_TOKEN;
 // Custom Mapbox style - NEVER change after init
 const MAPBOX_STYLE = 'mapbox://styles/maxvelocity/cmkew9qqf003y01rxdwxp37k4';
 
-// Zoom threshold for resolution switching
-const DETAIL_ZOOM_THRESHOLD = 6;
+// Use single resolution for consistent roundness at all zoom levels
+const FIXED_RESOLUTION = 'detail';
 
 // Risk levels for legend
 const RISK_LEVELS = [
@@ -37,8 +37,6 @@ interface WSSIGeoJSON {
   message?: string;
 }
 
-type Resolution = 'overview' | 'detail';
-
 // Max poll attempts and delay
 const POLL_DELAY_MS = 3000;
 const MAX_POLL_ATTEMPTS = 20; // 60 seconds max
@@ -50,10 +48,9 @@ export default function WSSIClient() {
   const sourceAdded = useRef(false);
   const layersAdded = useRef(false);
 
-  // State
+  // State - use fixed resolution for consistent appearance
   const [mapLoaded, setMapLoaded] = useState(false);
   const [selectedDay, setSelectedDay] = useState(1);
-  const [selectedRes, setSelectedRes] = useState<Resolution>('overview');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
@@ -205,19 +202,7 @@ export default function WSSIClient() {
       addWSSILayers();
     });
 
-    // Zoom-based resolution switching - use zoomend (not zoom)
-    map.current.on('zoomend', () => {
-      if (!map.current) return;
-      const zoom = map.current.getZoom();
-      const newRes: Resolution = zoom >= DETAIL_ZOOM_THRESHOLD ? 'detail' : 'overview';
-      setSelectedRes(prev => {
-        if (prev !== newRes) {
-          console.log(`[WSSI] Zoom changed resolution: ${prev} -> ${newRes}`);
-          return newRes;
-        }
-        return prev;
-      });
-    });
+    // No zoom-based resolution switching - use same data at all zoom levels
 
     return () => {
       console.log('[WSSI] Cleaning up map');
@@ -229,12 +214,12 @@ export default function WSSIClient() {
     };
   }, [addWSSILayers]);
 
-  // Fetch data when day or resolution changes
-  // ONLY depends on mapLoaded, selectedDay, selectedRes - nothing else!
+  // Fetch data when day changes
+  // Uses fixed resolution for consistent appearance at all zoom levels
   useEffect(() => {
     if (!mapLoaded) return;
 
-    const key = `${selectedDay}:${selectedRes}`;
+    const key = `${selectedDay}:${FIXED_RESOLUTION}`;
 
     // Guard: don't refetch if we already fetched this key
     if (lastFetchKey.current === key) {
@@ -269,7 +254,7 @@ export default function WSSIClient() {
 
       while (pollAttempts < MAX_POLL_ATTEMPTS) {
         try {
-          const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
+          const response = await fetch(`/api/wssi/day/${selectedDay}?res=${FIXED_RESOLUTION}`, {
             signal: controller.signal,
           });
 
@@ -360,7 +345,7 @@ export default function WSSIClient() {
     return () => {
       controller.abort();
     };
-  }, [mapLoaded, selectedDay, selectedRes, updateMapData]);
+  }, [mapLoaded, selectedDay, updateMapData]);
 
   // Handle day change
   const handleDayChange = useCallback((day: number) => {
@@ -372,30 +357,30 @@ export default function WSSIClient() {
   const handleRefresh = useCallback(() => {
     console.log(`[WSSI] Manual refresh`);
     // Clear cache for current key and reset lastFetchKey to force refetch
-    const key = `${selectedDay}:${selectedRes}`;
+    const key = `${selectedDay}:${FIXED_RESOLUTION}`;
     delete dataCache.current[key];
     lastFetchKey.current = null;
     // Force re-render by updating a state
     setSelectedDay(prev => prev); // This won't change value but will trigger effect
-  }, [selectedDay, selectedRes]);
+  }, [selectedDay]);
 
   // Force refetch by changing a trigger state
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   const handleRefreshClick = useCallback(() => {
     console.log(`[WSSI] Refresh clicked`);
-    const key = `${selectedDay}:${selectedRes}`;
+    const key = `${selectedDay}:${FIXED_RESOLUTION}`;
     delete dataCache.current[key];
     lastFetchKey.current = null;
     setRefreshTrigger(prev => prev + 1);
-  }, [selectedDay, selectedRes]);
+  }, [selectedDay]);
 
   // Add refreshTrigger to the fetch effect dependencies
   useEffect(() => {
     if (!mapLoaded) return;
     if (refreshTrigger === 0) return; // Skip initial mount
 
-    const key = `${selectedDay}:${selectedRes}`;
+    const key = `${selectedDay}:${FIXED_RESOLUTION}`;
     console.log(`[WSSI] Refresh trigger: ${key}`);
 
     // Abort any in-flight request
@@ -414,7 +399,7 @@ export default function WSSIClient() {
 
       while (pollAttempts < MAX_POLL_ATTEMPTS) {
         try {
-          const response = await fetch(`/api/wssi/day/${selectedDay}?res=${selectedRes}`, {
+          const response = await fetch(`/api/wssi/day/${selectedDay}?res=${FIXED_RESOLUTION}`, {
             signal: controller.signal,
           });
 
@@ -472,7 +457,7 @@ export default function WSSIClient() {
 
     fetchData();
     return () => controller.abort();
-  }, [refreshTrigger, mapLoaded, selectedDay, selectedRes, updateMapData]);
+  }, [refreshTrigger, mapLoaded, selectedDay, updateMapData]);
 
   return (
     <div className="h-screen bg-mv-bg-primary flex flex-col overflow-hidden">
@@ -491,9 +476,6 @@ export default function WSSIClient() {
                 Updated: {lastUpdate}
               </span>
             )}
-            <span className="text-xs text-cyan-400 font-mono hidden sm:inline">
-              {selectedRes}
-            </span>
             {metrics && (
               <span className="text-xs text-mv-text-muted hidden lg:inline font-mono">
                 {metrics.features}f/{metrics.vertices}v/{(metrics.bytes / 1024).toFixed(0)}KB
@@ -561,7 +543,7 @@ export default function WSSIClient() {
               winter weather impacts over the next 3 days.
             </p>
             <p className="mt-2 text-[10px]">
-              Zoom in for higher detail resolution.
+              Smoothed with 25-mile radius curves.
             </p>
           </section>
         </aside>

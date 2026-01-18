@@ -62,27 +62,28 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters
+// Smoothing parameters - SAME for all zoom levels for consistency
 // Use buffer smoothing to create ROUNDED corners (min 25 mile / 40km radius)
 // Larger buffer = rounder corners, more steps = smoother arcs
 const SMOOTH_PARAMS = {
+  // Use same params for both resolutions to ensure consistent appearance at all zooms
   overview: {
-    preSimplifyTol: 0.02,  // Moderate pre-simplification
+    preSimplifyTol: 0.005, // Very light pre-simplification to preserve shape
     useBuffer: true,       // USE buffer for rounded corners
     bufferOut: 45,         // 45km buffer out (~28 miles) - creates rounded corners
     bufferIn: 40,          // 40km buffer in - net 5km expansion for overlap
-    bufferSteps: 16,       // High step count for smooth arcs
-    postSimplifyTol: 0.03, // Light final simplification to preserve curves
-    minAreaKm2: 500,       // Min 500 km² (larger to remove noise)
+    bufferSteps: 32,       // High step count for very smooth arcs
+    postSimplifyTol: 0.008, // Very light final simplification to preserve curves
+    minAreaKm2: 200,       // Min 200 km²
   },
   detail: {
-    preSimplifyTol: 0.008, // Light pre-simplification
+    preSimplifyTol: 0.005, // Same as overview for consistency
     useBuffer: true,       // Use buffer for rounded corners
-    bufferOut: 42,         // 42km buffer out (~26 miles) - creates rounded corners
-    bufferIn: 38,          // 38km buffer in - net 4km expansion for overlap
-    bufferSteps: 24,       // Higher step count for smoother arcs in detail
-    postSimplifyTol: 0.012, // Very light simplification to preserve curves
-    minAreaKm2: 200,       // Min 200 km²
+    bufferOut: 45,         // Same as overview - 45km buffer out
+    bufferIn: 40,          // Same as overview - 40km buffer in
+    bufferSteps: 32,       // Same high step count
+    postSimplifyTol: 0.008, // Same light simplification
+    minAreaKm2: 200,       // Same min area
   },
 };
 
