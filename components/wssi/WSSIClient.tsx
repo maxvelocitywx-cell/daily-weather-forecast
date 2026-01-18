@@ -39,44 +39,52 @@ export default function WSSIClient() {
 
   // Update tile source URL when day changes
   const updateTileSource = useCallback((day: number) => {
-    if (!map.current || !mapLoaded) return;
+    if (!map.current) return;
 
     console.log(`[WSSI] Updating tile source for day ${day}`);
     currentDay.current = day;
 
     // Remove existing source and layer if present
-    if (map.current.getLayer(WSSI_LAYER_ID)) {
-      map.current.removeLayer(WSSI_LAYER_ID);
-    }
-    if (map.current.getSource(WSSI_SOURCE_ID)) {
-      map.current.removeSource(WSSI_SOURCE_ID);
+    try {
+      if (map.current.getLayer(WSSI_LAYER_ID)) {
+        map.current.removeLayer(WSSI_LAYER_ID);
+      }
+      if (map.current.getSource(WSSI_SOURCE_ID)) {
+        map.current.removeSource(WSSI_SOURCE_ID);
+      }
+    } catch (e) {
+      // Ignore errors during cleanup
     }
 
     // Add new source with updated day
     const tileUrl = `/api/tiles/wssi/${day}/{z}/{x}/{y}`;
 
-    map.current.addSource(WSSI_SOURCE_ID, {
-      type: 'raster',
-      tiles: [tileUrl],
-      tileSize: 256,
-      minzoom: 2,
-      maxzoom: 10,
-    });
+    try {
+      map.current.addSource(WSSI_SOURCE_ID, {
+        type: 'raster',
+        tiles: [tileUrl],
+        tileSize: 256,
+        minzoom: 2,
+        maxzoom: 10,
+      });
 
-    // Add raster layer
-    map.current.addLayer({
-      id: WSSI_LAYER_ID,
-      type: 'raster',
-      source: WSSI_SOURCE_ID,
-      paint: {
-        'raster-opacity': 0.85,
-        'raster-fade-duration': 200,
-      },
-    });
+      // Add raster layer
+      map.current.addLayer({
+        id: WSSI_LAYER_ID,
+        type: 'raster',
+        source: WSSI_SOURCE_ID,
+        paint: {
+          'raster-opacity': 0.85,
+          'raster-fade-duration': 200,
+        },
+      });
+    } catch (e) {
+      console.error('[WSSI] Error adding tile source:', e);
+    }
 
     setLoading(false);
     setError(null);
-  }, [mapLoaded]);
+  }, []);
 
   // Initialize map ONCE
   useEffect(() => {
@@ -84,7 +92,7 @@ export default function WSSIClient() {
 
     console.log('[WSSI] Initializing map');
 
-    map.current = new mapboxgl.Map({
+    const mapInstance = new mapboxgl.Map({
       container: mapContainer.current,
       style: MAPBOX_STYLE,
       center: [-98, 39],
@@ -93,15 +101,17 @@ export default function WSSIClient() {
       maxZoom: 10,
     });
 
-    map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
+    map.current = mapInstance;
 
-    map.current.on('load', () => {
+    mapInstance.addControl(new mapboxgl.NavigationControl(), 'top-right');
+
+    mapInstance.on('load', () => {
       console.log('[WSSI] Map loaded');
       setMapLoaded(true);
     });
 
     // Handle style reload (if style changes externally)
-    map.current.on('style.load', () => {
+    mapInstance.on('style.load', () => {
       console.log('[WSSI] Style reloaded, re-adding tiles');
       // Re-add tile source after style change
       if (currentDay.current) {
@@ -110,19 +120,19 @@ export default function WSSIClient() {
     });
 
     // Track tile loading state
-    map.current.on('dataloading', (e: mapboxgl.MapDataEvent) => {
+    mapInstance.on('dataloading', (e: mapboxgl.MapDataEvent) => {
       if ('sourceId' in e && e.sourceId === WSSI_SOURCE_ID) {
         setLoading(true);
       }
     });
 
-    map.current.on('data', (e: mapboxgl.MapDataEvent) => {
+    mapInstance.on('data', (e: mapboxgl.MapDataEvent) => {
       if ('sourceId' in e && e.sourceId === WSSI_SOURCE_ID && 'isSourceLoaded' in e && e.isSourceLoaded) {
         setLoading(false);
       }
     });
 
-    map.current.on('error', (e: mapboxgl.ErrorEvent) => {
+    mapInstance.on('error', (e: mapboxgl.ErrorEvent) => {
       // Check if this is a source-related error
       const sourceError = e as unknown as { sourceId?: string };
       if (sourceError.sourceId === WSSI_SOURCE_ID) {
@@ -133,10 +143,11 @@ export default function WSSIClient() {
 
     return () => {
       console.log('[WSSI] Cleaning up map');
-      map.current?.remove();
+      mapInstance.remove();
       map.current = null;
     };
-  }, [updateTileSource]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Add initial tile layer when map loads
   useEffect(() => {
