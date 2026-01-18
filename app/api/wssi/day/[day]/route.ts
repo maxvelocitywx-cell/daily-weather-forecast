@@ -62,31 +62,40 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters - smooth blob-like boundaries (like SPC/WPC graphics)
-// Pipeline: light pre-simplify -> symmetric buffer -> densify -> minimal post-simplify
+// Smoothing parameters - ALL VALUES IN METERS (EPSG:3857)
+// Pipeline: reproject to 3857 -> pre-simplify -> two-pass buffer -> densify -> post-simplify -> reproject to 4326
 const SMOOTH_PARAMS = {
   // Use same params for both resolutions to ensure consistent appearance at all zooms
   overview: {
-    preSimplifyTol: 0.005,  // LIGHT pre-simplification - just remove stair-steps, keep shape
-    useBuffer: true,        // USE buffer for rounding
-    bufferOut: 40,          // 40km symmetric buffer out
-    bufferIn: 40,           // 40km symmetric buffer in (same distance = pure rounding)
-    bufferSteps: 48,        // High step count for smooth arcs
-    densifyMaxSegment: 15,  // Max 15km segment length - densify longer segments
-    densifyInterval: 4,     // Insert points every 4km on long segments
-    postSimplifyTol: 0.0005, // MINIMAL post-simplification to preserve curves
-    minAreaKm2: 400,        // Min 400 km² to remove small features
+    // Pre-simplify: only remove stair-steps, NOT reshape (2-5km max)
+    preSimplifyMeters: 3000,        // 3km - light, just removes grid artifacts
+    // First buffer pass: large symmetric rounding
+    buffer1OutMeters: 40000,        // 40km out
+    buffer1InMeters: 40000,         // 40km in (symmetric = pure rounding)
+    buffer1Steps: 48,               // High step count for smooth arcs
+    // Second buffer pass: smaller refinement
+    buffer2OutMeters: 12000,        // 12km out
+    buffer2InMeters: 12000,         // 12km in
+    buffer2Steps: 48,               // Same high step count
+    // Densification: kill long straight segments AFTER buffer
+    densifyMaxSegmentMeters: 8000,  // Max 8km segment length
+    densifyIntervalMeters: 2000,    // Insert points every 2km
+    // Post-simplify: very light to preserve curves (0.5-1.5km)
+    postSimplifyMeters: 1000,       // 1km - light enough to keep curves
+    minAreaKm2: 400,                // Min area filter (keep in km² for area calc)
   },
   detail: {
-    preSimplifyTol: 0.005,  // Same as overview for consistency
-    useBuffer: true,        // USE buffer for rounding
-    bufferOut: 40,          // Same symmetric buffer
-    bufferIn: 40,           // Same symmetric buffer
-    bufferSteps: 48,        // Same high step count
-    densifyMaxSegment: 15,  // Same densification
-    densifyInterval: 4,     // Same interval
-    postSimplifyTol: 0.0005, // Same minimal post-simplification
-    minAreaKm2: 400,        // Same min area
+    preSimplifyMeters: 3000,
+    buffer1OutMeters: 40000,
+    buffer1InMeters: 40000,
+    buffer1Steps: 48,
+    buffer2OutMeters: 12000,
+    buffer2InMeters: 12000,
+    buffer2Steps: 48,
+    densifyMaxSegmentMeters: 8000,
+    densifyIntervalMeters: 2000,
+    postSimplifyMeters: 1000,
+    minAreaKm2: 400,
   },
 };
 
@@ -253,21 +262,12 @@ function safeDifference(a: PolygonFeature | null, b: PolygonFeature | null): Pol
 }
 
 /**
- * Calculate distance between two points in kilometers (Haversine formula)
+ * Calculate Euclidean distance between two points in EPSG:3857 (meters)
  */
-function distanceKm(p1: Position, p2: Position): number {
-  const R = 6371; // Earth's radius in km
-  const lat1 = p1[1] * Math.PI / 180;
-  const lat2 = p2[1] * Math.PI / 180;
-  const dLat = (p2[1] - p1[1]) * Math.PI / 180;
-  const dLon = (p2[0] - p1[0]) * Math.PI / 180;
-
-  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-            Math.cos(lat1) * Math.cos(lat2) *
-            Math.sin(dLon/2) * Math.sin(dLon/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-
-  return R * c;
+function distanceMeters(p1: Position, p2: Position): number {
+  const dx = p2[0] - p1[0];
+  const dy = p2[1] - p1[1];
+  return Math.sqrt(dx * dx + dy * dy);
 }
 
 /**
@@ -281,10 +281,10 @@ function interpolatePoint(p1: Position, p2: Position, t: number): Position {
 }
 
 /**
- * Densify a ring by inserting points along long segments
+ * Densify a ring by inserting points along long segments (works in EPSG:3857 meters)
  * This prevents visible straight edges after buffering
  */
-function densifyRing(ring: Position[], maxSegmentKm: number, intervalKm: number): Position[] {
+function densifyRingMeters(ring: Position[], maxSegmentMeters: number, intervalMeters: number): Position[] {
   if (ring.length < 2) return ring;
 
   const result: Position[] = [];
@@ -295,11 +295,11 @@ function densifyRing(ring: Position[], maxSegmentKm: number, intervalKm: number)
 
     result.push(p1);
 
-    const dist = distanceKm(p1, p2);
+    const dist = distanceMeters(p1, p2);
 
-    if (dist > maxSegmentKm) {
+    if (dist > maxSegmentMeters) {
       // Insert points along this segment
-      const numPoints = Math.ceil(dist / intervalKm) - 1;
+      const numPoints = Math.ceil(dist / intervalMeters) - 1;
       for (let j = 1; j <= numPoints; j++) {
         const t = j / (numPoints + 1);
         result.push(interpolatePoint(p1, p2, t));
@@ -314,82 +314,129 @@ function densifyRing(ring: Position[], maxSegmentKm: number, intervalKm: number)
 }
 
 /**
- * Densify a geometry by inserting points along long straight segments
- * This kills long straight chords that appear after buffering
+ * Densify a geometry by inserting points along long straight segments (EPSG:3857 meters)
+ * MUST be called on geometry already in EPSG:3857
  */
-function densifyGeometry(feature: PolygonFeature, maxSegmentKm: number, intervalKm: number): PolygonFeature {
-  const geom = feature.geometry;
-
+function densifyGeometryMeters(geom: Polygon | MultiPolygon, maxSegmentMeters: number, intervalMeters: number): Polygon | MultiPolygon {
   if (geom.type === 'Polygon') {
     const densifiedCoords = geom.coordinates.map(ring =>
-      densifyRing(ring, maxSegmentKm, intervalKm)
+      densifyRingMeters(ring, maxSegmentMeters, intervalMeters)
     );
-
-    return {
-      ...feature,
-      geometry: { type: 'Polygon', coordinates: densifiedCoords },
-    };
+    return { type: 'Polygon', coordinates: densifiedCoords };
   }
 
   if (geom.type === 'MultiPolygon') {
     const densifiedCoords = geom.coordinates.map(poly =>
-      poly.map(ring => densifyRing(ring, maxSegmentKm, intervalKm))
+      poly.map(ring => densifyRingMeters(ring, maxSegmentMeters, intervalMeters))
     );
-
-    return {
-      ...feature,
-      geometry: { type: 'MultiPolygon', coordinates: densifiedCoords },
-    };
+    return { type: 'MultiPolygon', coordinates: densifiedCoords };
   }
 
-  return feature;
+  return geom;
 }
 
 /**
- * Apply morphological smoothing: buffer out then buffer in
- * This eliminates jagged stair-step edges and fills small gaps
- * Using asymmetric buffer (more out than in) creates slight overlap between bands
+ * Buffer a JSTS geometry (in EPSG:3857 meters)
+ * Uses round joins for smooth curves
  */
-function morphologicalSmooth(
-  feature: PolygonFeature,
-  bufferOutKm: number,
-  bufferInKm: number,
-  steps: number
-): PolygonFeature | null {
+function jstsBuffer(jstsGeom: ReturnType<typeof geoJsonReader.read>, distanceMeters: number, steps: number): ReturnType<typeof geoJsonReader.read> {
+  // JSTS buffer uses quadrantSegments parameter for smoothness
+  // More segments = smoother curves
+  const quadSegs = Math.max(8, Math.floor(steps / 4));
+  return jstsGeom.buffer(distanceMeters, quadSegs);
+}
+
+/**
+ * Apply full smoothing pipeline in EPSG:3857 (meters)
+ * Pipeline: pre-simplify -> buffer1 out/in -> buffer2 out/in -> densify -> post-simplify
+ */
+function smoothGeometryIn3857(
+  mercatorGeom: Polygon | MultiPolygon,
+  params: typeof SMOOTH_PARAMS.overview
+): Polygon | MultiPolygon | null {
   try {
-    console.log(`[WSSI] morphologicalSmooth: out=${bufferOutKm}km, in=${bufferInKm}km, steps=${steps}`);
+    let jstsGeom = geoJsonReader.read(mercatorGeom);
+    const startVertices = jstsGeom.getNumPoints();
+    console.log(`[WSSI] smoothGeometryIn3857 START: ${startVertices} vertices`);
 
-    // Buffer OUT (dilate) - expands the polygon, filling in jagged edges and small gaps
-    const bufferedOut = turf.buffer(feature, bufferOutKm, {
-      units: 'kilometers',
-      steps: steps,
-    });
+    // Step 1: PRE-SIMPLIFY in meters (light - just remove stair-steps)
+    const preSimplifier = new TopologyPreservingSimplifier(jstsGeom);
+    preSimplifier.setDistanceTolerance(params.preSimplifyMeters);
+    jstsGeom = preSimplifier.getResultGeometry();
+    console.log(`[WSSI] After pre-simplify (${params.preSimplifyMeters}m): ${jstsGeom.getNumPoints()} vertices`);
 
-    if (!bufferedOut?.geometry) {
-      console.warn('[WSSI] morphologicalSmooth: buffer out returned null');
-      return feature;
+    // Make valid after simplify
+    if (!jstsGeom.isValid()) {
+      jstsGeom = jstsGeom.buffer(0);
+    }
+    if (jstsGeom.isEmpty()) return null;
+
+    // Step 2: FIRST BUFFER PASS (large symmetric rounding)
+    // Buffer OUT
+    jstsGeom = jstsBuffer(jstsGeom, params.buffer1OutMeters, params.buffer1Steps);
+    console.log(`[WSSI] After buffer1 OUT (${params.buffer1OutMeters}m): ${jstsGeom.getNumPoints()} vertices`);
+    if (jstsGeom.isEmpty()) return null;
+
+    // Buffer IN (same distance = pure rounding, no net size change)
+    jstsGeom = jstsBuffer(jstsGeom, -params.buffer1InMeters, params.buffer1Steps);
+    console.log(`[WSSI] After buffer1 IN (${params.buffer1InMeters}m): ${jstsGeom.getNumPoints()} vertices`);
+    if (jstsGeom.isEmpty()) return null;
+
+    // Step 3: SECOND BUFFER PASS (smaller refinement)
+    jstsGeom = jstsBuffer(jstsGeom, params.buffer2OutMeters, params.buffer2Steps);
+    console.log(`[WSSI] After buffer2 OUT (${params.buffer2OutMeters}m): ${jstsGeom.getNumPoints()} vertices`);
+    if (jstsGeom.isEmpty()) return null;
+
+    jstsGeom = jstsBuffer(jstsGeom, -params.buffer2InMeters, params.buffer2Steps);
+    console.log(`[WSSI] After buffer2 IN (${params.buffer2InMeters}m): ${jstsGeom.getNumPoints()} vertices`);
+    if (jstsGeom.isEmpty()) return null;
+
+    // Make valid after buffers
+    if (!jstsGeom.isValid()) {
+      jstsGeom = jstsGeom.buffer(0);
     }
 
-    // Buffer IN (erode) - contracts back, now with smooth edges
-    // Using less than bufferOut creates net expansion for overlap
-    const bufferedIn = turf.buffer(bufferedOut, -bufferInKm, {
-      units: 'kilometers',
-      steps: steps,
-    });
-
-    if (!bufferedIn?.geometry) {
-      console.warn('[WSSI] morphologicalSmooth: buffer in returned null');
-      return feature;
+    // Convert back to GeoJSON for densification
+    let resultGeom = geoJsonWriter.write(jstsGeom) as Polygon | MultiPolygon;
+    if (resultGeom.type !== 'Polygon' && resultGeom.type !== 'MultiPolygon') {
+      console.warn('[WSSI] Buffer result not polygon');
+      return null;
     }
 
-    const beforeVerts = countGeometry(feature).vertices;
-    const afterVerts = countGeometry(bufferedIn as PolygonFeature).vertices;
-    console.log(`[WSSI] morphologicalSmooth: ${beforeVerts} -> ${afterVerts} vertices`);
+    // Step 4: DENSIFY after buffer to kill long straight chords
+    const beforeDensify = jstsGeom.getNumPoints();
+    resultGeom = densifyGeometryMeters(
+      resultGeom,
+      params.densifyMaxSegmentMeters,
+      params.densifyIntervalMeters
+    );
 
-    return bufferedIn as PolygonFeature;
+    // Read back for post-simplify
+    jstsGeom = geoJsonReader.read(resultGeom);
+    console.log(`[WSSI] After densify (max ${params.densifyMaxSegmentMeters}m, interval ${params.densifyIntervalMeters}m): ${beforeDensify} -> ${jstsGeom.getNumPoints()} vertices`);
+
+    // Step 5: POST-SIMPLIFY (very light to preserve curves)
+    const postSimplifier = new TopologyPreservingSimplifier(jstsGeom);
+    postSimplifier.setDistanceTolerance(params.postSimplifyMeters);
+    jstsGeom = postSimplifier.getResultGeometry();
+    console.log(`[WSSI] After post-simplify (${params.postSimplifyMeters}m): ${jstsGeom.getNumPoints()} vertices`);
+
+    // Final validation
+    if (!jstsGeom.isValid()) {
+      jstsGeom = jstsGeom.buffer(0);
+    }
+    if (jstsGeom.isEmpty()) return null;
+
+    resultGeom = geoJsonWriter.write(jstsGeom) as Polygon | MultiPolygon;
+    if (resultGeom.type !== 'Polygon' && resultGeom.type !== 'MultiPolygon') {
+      return null;
+    }
+
+    console.log(`[WSSI] smoothGeometryIn3857 COMPLETE: ${startVertices} -> ${jstsGeom.getNumPoints()} vertices`);
+    return resultGeom;
   } catch (err) {
-    console.warn('[WSSI] Smoothing failed, using original:', err);
-    return feature;
+    console.error('[WSSI] smoothGeometryIn3857 failed:', err);
+    return null;
   }
 }
 
@@ -732,74 +779,61 @@ function processWSSIData(
   let totalComponents = 0;
 
   for (const category of CATEGORY_ORDER) {
-    let band = bands[category];
+    const band = bands[category];
     if (!band?.geometry) continue;
 
-    // Step 1: PRE-SIMPLIFY aggressively to reduce vertices BEFORE buffer
-    // This is critical for performance - buffer ops are O(n²) on vertices
-    try {
-      const preSimplified = turf.simplify(band, {
-        tolerance: params.preSimplifyTol,
-        highQuality: false, // Fast mode for pre-simplification
-        mutate: false,
-      });
-      if (preSimplified?.geometry) {
-        band = preSimplified as PolygonFeature;
-      }
-    } catch {
-      // Continue with original
+    console.log(`[WSSI] Processing ${category}...`);
+
+    // === NEW PIPELINE: ALL OPERATIONS IN EPSG:3857 (METERS) ===
+
+    // Step 1: Reproject to EPSG:3857
+    const mercatorGeom = reprojectGeometry(band.geometry, true);
+
+    // Step 2: Apply full smoothing pipeline in EPSG:3857
+    const smoothedMercator = smoothGeometryIn3857(mercatorGeom, params);
+    if (!smoothedMercator) {
+      console.warn(`[WSSI] Skipping ${category} - smoothing returned null`);
+      continue;
     }
 
-    // Step 2: Morphological smoothing (buffer out then in)
-    if ('useBuffer' in params && params.useBuffer && 'bufferOut' in params) {
-      const smoothed = morphologicalSmooth(
-        band,
-        params.bufferOut as number,
-        params.bufferIn as number,
-        params.bufferSteps as number
-      );
-      if (smoothed) {
-        band = smoothed;
-      }
+    // Step 3: Reproject back to EPSG:4326
+    const smoothedWGS84 = reprojectGeometry(smoothedMercator, false);
+
+    // Create feature with smoothed geometry
+    let smoothedBand: PolygonFeature = {
+      ...band,
+      geometry: smoothedWGS84,
+    };
+
+    // Step 4: Remove small fragments
+    const fragCleaned = removeSmallFragments(smoothedBand, params.minAreaKm2);
+    if (!fragCleaned) {
+      console.warn(`[WSSI] Skipping ${category} - too small after smoothing`);
+      continue;
     }
+    smoothedBand = fragCleaned;
 
-    // Step 2.5: DENSIFY after buffer to kill long straight chords
-    // This inserts points along segments > maxSegmentKm every intervalKm
-    if ('densifyMaxSegment' in params && 'densifyInterval' in params) {
-      const beforeDensify = countGeometry(band).vertices;
-      band = densifyGeometry(
-        band,
-        params.densifyMaxSegment as number,
-        params.densifyInterval as number
-      );
-      const afterDensify = countGeometry(band).vertices;
-      console.log(`[WSSI] Densified ${category}: ${beforeDensify} -> ${afterDensify} vertices`);
-    }
-
-    // Step 3: Remove small fragments early
-    const fragCleaned = removeSmallFragments(band, params.minAreaKm2);
-    if (!fragCleaned) continue;
-    band = fragCleaned;
-
-    // Step 4: MANDATORY GEOMETRY SANITIZATION
-    // This is critical to prevent Mapbox triangulation failures
-    const sanitized = sanitizeGeometry(band, resolution);
+    // Step 5: Final geometry sanitization (for Mapbox compatibility)
+    const sanitized = sanitizeGeometry(smoothedBand, resolution);
     if (!sanitized) {
       console.warn(`[WSSI] Skipping ${category} - sanitization returned null`);
       continue;
     }
-    band = sanitized;
+    smoothedBand = sanitized;
 
-    // Step 5: Final area check
+    // Step 6: Final area check
     try {
-      const finalArea = turf.area(band);
-      if (finalArea < params.minAreaKm2 * 1_000_000) continue;
+      const finalArea = turf.area(smoothedBand);
+      if (finalArea < params.minAreaKm2 * 1_000_000) {
+        console.warn(`[WSSI] Skipping ${category} - area too small: ${(finalArea / 1_000_000).toFixed(0)} km²`);
+        continue;
+      }
     } catch {
       continue;
     }
 
     const riskInfo = WSSI_TO_RISK[category];
-    const { vertices, components } = countGeometry(band);
+    const { vertices, components } = countGeometry(smoothedBand);
     totalVertices += vertices;
     totalComponents += components;
 
@@ -807,7 +841,7 @@ function processWSSIData(
 
     processedFeatures.push({
       type: 'Feature',
-      geometry: band.geometry,
+      geometry: smoothedBand.geometry,
       properties: {
         day,
         category,
