@@ -62,40 +62,39 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
   'extreme': { label: 'High Risk', originalLabel: 'Extreme Impacts', color: '#DC2626', order: 5 },
 };
 
-// Smoothing parameters - ALL VALUES IN METERS (EPSG:3857)
-// Pipeline: reproject to 3857 -> pre-simplify -> two-pass buffer -> densify -> post-simplify -> reproject to 4326
-// NOTE: Buffer distances must be small enough that polygons survive the inward buffer!
+// Smoothing parameters - ALL VALUES IN METERS
+// Pipeline: pre-simplify -> buffer out/in (large) -> buffer out/in (small) -> densify -> post-simplify
+// Goal: FULLY ROUNDED boundaries with NO corners or straight edges
 const SMOOTH_PARAMS = {
-  // Use same params for both resolutions to ensure consistent appearance at all zooms
   overview: {
-    // Pre-simplify: only remove stair-steps, NOT reshape (2-5km max)
-    preSimplifyMeters: 3000,        // 3km - light, just removes grid artifacts
-    // First buffer pass: symmetric rounding (reduced from 40km to avoid erasing small polygons)
-    buffer1OutMeters: 15000,        // 15km out
-    buffer1InMeters: 15000,         // 15km in (symmetric = pure rounding)
-    buffer1Steps: 32,               // High step count for smooth arcs
-    // Second buffer pass: smaller refinement
-    buffer2OutMeters: 8000,         // 8km out
-    buffer2InMeters: 8000,          // 8km in
-    buffer2Steps: 32,               // Same high step count
-    // Densification: kill long straight segments AFTER buffer
-    densifyMaxSegmentMeters: 8000,  // Max 8km segment length
-    densifyIntervalMeters: 2000,    // Insert points every 2km
-    // Post-simplify: very light to preserve curves (0.5-1.5km)
-    postSimplifyMeters: 1000,       // 1km - light enough to keep curves
-    minAreaKm2: 400,                // Min area filter (keep in km² for area calc)
+    // Pre-simplify: aggressive to remove grid stair-steps
+    preSimplifyMeters: 5000,        // 5km - removes grid artifacts
+    // First buffer pass: LARGE symmetric rounding for smooth curves
+    buffer1OutMeters: 25000,        // 25km out - creates large rounded corners
+    buffer1InMeters: 25000,         // 25km in - symmetric = pure rounding
+    buffer1Steps: 64,               // HIGH step count for very smooth arcs
+    // Second buffer pass: refinement for any remaining edges
+    buffer2OutMeters: 10000,        // 10km out
+    buffer2InMeters: 10000,         // 10km in
+    buffer2Steps: 64,               // Same high step count
+    // Densification: break up ANY remaining straight segments
+    densifyMaxSegmentMeters: 5000,  // Max 5km segment - shorter = rounder
+    densifyIntervalMeters: 1000,    // Insert points every 1km
+    // Post-simplify: VERY light to preserve curves
+    postSimplifyMeters: 500,        // 0.5km - barely simplify
+    minAreaKm2: 400,                // Min area filter
   },
   detail: {
-    preSimplifyMeters: 3000,
-    buffer1OutMeters: 15000,
-    buffer1InMeters: 15000,
-    buffer1Steps: 32,
-    buffer2OutMeters: 8000,
-    buffer2InMeters: 8000,
-    buffer2Steps: 32,
-    densifyMaxSegmentMeters: 8000,
-    densifyIntervalMeters: 2000,
-    postSimplifyMeters: 1000,
+    preSimplifyMeters: 5000,
+    buffer1OutMeters: 25000,
+    buffer1InMeters: 25000,
+    buffer1Steps: 64,
+    buffer2OutMeters: 10000,
+    buffer2InMeters: 10000,
+    buffer2Steps: 64,
+    densifyMaxSegmentMeters: 5000,
+    densifyIntervalMeters: 1000,
+    postSimplifyMeters: 500,
     minAreaKm2: 400,
   },
 };
