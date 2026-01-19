@@ -954,35 +954,50 @@ function createSmoothContours(
         });
 
         if (categoryBand && categoryBand.geometry) {
-          // Apply Chaikin smoothing to contour coordinates for smooth curves
-          let smoothedGeom = categoryBand.geometry as Polygon | MultiPolygon;
+          // === STEP 1: Simplify first to reduce vertices ===
+          let workingFeature: PolygonFeature = {
+            type: 'Feature',
+            geometry: categoryBand.geometry as Polygon | MultiPolygon,
+            properties: categoryBand.properties || {},
+          };
+
+          try {
+            const simplified = turf.simplify(workingFeature, { tolerance: 0.1, highQuality: true });
+            if (simplified && simplified.geometry) {
+              workingFeature = simplified as PolygonFeature;
+              console.log(`[WSSI] Simplified ${category} contour`);
+            }
+          } catch (simplifyErr) {
+            console.warn(`[WSSI] Simplify failed for ${category}:`, simplifyErr);
+          }
+
+          // === STEP 2: Apply Chaikin smoothing (more iterations for rounder curves) ===
+          let smoothedGeom = workingFeature.geometry as Polygon | MultiPolygon;
 
           if (smoothedGeom.type === 'Polygon') {
             smoothedGeom = {
               type: 'Polygon',
-              coordinates: smoothedGeom.coordinates.map(ring => chaikinSmoothCoords(ring, 4))
+              coordinates: smoothedGeom.coordinates.map(ring => chaikinSmoothCoords(ring, 7)) // 7 iterations
             };
           } else if (smoothedGeom.type === 'MultiPolygon') {
             smoothedGeom = {
               type: 'MultiPolygon',
               coordinates: smoothedGeom.coordinates.map(polygon =>
-                polygon.map(ring => chaikinSmoothCoords(ring, 4))
+                polygon.map(ring => chaikinSmoothCoords(ring, 7)) // 7 iterations
               )
             };
           }
 
-          console.log(`[WSSI] Applied Chaikin smoothing to ${category} contour`);
+          console.log(`[WSSI] Applied Chaikin smoothing (7 iterations) to ${category} contour`);
 
-          // Remove holes from polygons - keep only outer rings for solid fills
-          // Isobands creates holes where higher-value regions exist, but we handle
-          // those as separate category layers, so holes just create visual artifacts
+          // === STEP 3: Remove holes from polygons ===
           if (smoothedGeom.type === 'Polygon') {
             const origRings = smoothedGeom.coordinates.length;
             if (origRings > 1) {
               console.log(`[WSSI] Removing ${origRings - 1} holes from ${category} Polygon`);
               smoothedGeom = {
                 type: 'Polygon',
-                coordinates: [smoothedGeom.coordinates[0]] // Keep only outer ring
+                coordinates: [smoothedGeom.coordinates[0]]
               };
             }
           } else if (smoothedGeom.type === 'MultiPolygon') {
@@ -993,7 +1008,7 @@ function createSmoothContours(
                 if (polygon.length > 1) {
                   totalHolesRemoved += polygon.length - 1;
                 }
-                return [polygon[0]]; // Keep only outer ring of each polygon
+                return [polygon[0]];
               })
             };
             if (totalHolesRemoved > 0) {
@@ -1001,7 +1016,7 @@ function createSmoothContours(
             }
           }
 
-          // Fix winding order after smoothing - ensures polygons render as fills, not holes
+          // === STEP 4: Buffer out then in to round corners (pillow effect) ===
           let finalFeature: PolygonFeature = {
             type: 'Feature',
             geometry: smoothedGeom,
@@ -1009,7 +1024,26 @@ function createSmoothContours(
           };
 
           try {
-            // turf.rewind ensures correct winding order (outer rings CCW, holes CW for GeoJSON)
+            // Buffer out 10km then in 8km = net +2km but rounds all corners
+            const bufferedOut = turf.buffer(finalFeature, 10, { units: 'kilometers' });
+            if (bufferedOut && bufferedOut.geometry) {
+              const bufferedIn = turf.buffer(bufferedOut, -8, { units: 'kilometers' });
+              if (bufferedIn && bufferedIn.geometry) {
+                finalFeature = {
+                  type: 'Feature',
+                  geometry: bufferedIn.geometry as Polygon | MultiPolygon,
+                  properties: categoryBand.properties || {},
+                };
+                console.log(`[WSSI] Applied buffer rounding to ${category}`);
+              }
+            }
+          } catch (bufferErr) {
+            console.warn(`[WSSI] Buffer rounding failed for ${category}:`, bufferErr);
+            // Keep the smoothed geometry if buffer fails
+          }
+
+          // === STEP 5: Fix winding order ===
+          try {
             finalFeature = turf.rewind(finalFeature, { reverse: false }) as PolygonFeature;
             console.log(`[WSSI] Fixed winding order for ${category}`);
           } catch (rewindErr) {
@@ -1108,9 +1142,9 @@ function processWSSIData(
   // === SMOOTH CONTOURING APPROACH ===
   // Convert angular county-based polygons into smooth organic blobs
   // using grid sampling and isoband generation
-  // Grid + Chaikin smoothing on contours = smooth blobs
-  // Note: 0.05° was too fine (504 timeout), 0.15° works within time limits
-  const cellSize = resolution === 'overview' ? 0.2 : 0.15; // degrees - balance smoothness vs speed
+  // Pipeline: coarse grid → simplify → Chaikin smooth → buffer round = soft pillow shapes
+  // Larger cellSize = more generalized blobby shapes (less geographic detail)
+  const cellSize = resolution === 'overview' ? 0.4 : 0.35; // degrees - coarse for blobby shapes
   const smoothBands = createSmoothContours(rawBands, cellSize);
 
   // Process each smooth band
