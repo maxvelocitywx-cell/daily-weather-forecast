@@ -807,9 +807,21 @@ function sanitizeGeometry(feature: PolygonFeature, resolution: 'overview' | 'det
  */
 function createSmoothContours(
   bands: Record<WSSICategory, PolygonFeature | null>,
-  cellSize: number = 0.15 // degrees - smaller = smoother but slower
+  cellSize: number = 0.1 // degrees - smaller = smoother but slower
 ): Record<WSSICategory, PolygonFeature | null> {
   console.log(`[WSSI] Creating smooth contours with cellSize=${cellSize}°`);
+
+  // Debug: Log which categories exist in raw data
+  console.log(`[WSSI] Raw bands present:`);
+  for (const category of CATEGORY_ORDER) {
+    const band = bands[category];
+    if (band) {
+      const area = turf.area(band) / 1_000_000; // km²
+      console.log(`  - ${category}: YES (area: ${area.toFixed(0)} km²)`);
+    } else {
+      console.log(`  - ${category}: NO`);
+    }
+  }
 
   // Calculate bounding box of all features
   const allFeatures: PolygonFeature[] = [];
@@ -850,6 +862,8 @@ function createSmoothContours(
 
   // For each point, determine the highest WSSI category it falls in
   const sampleStart = Date.now();
+  const valueCounts: Record<number, number> = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+
   for (const point of grid.features) {
     let maxValue = 0;
 
@@ -869,8 +883,17 @@ function createSmoothContours(
     }
 
     point.properties = { ...point.properties, value: maxValue };
+    valueCounts[maxValue]++;
   }
+
   console.log(`[WSSI] Sampled grid in ${Date.now() - sampleStart}ms`);
+  console.log(`[WSSI] Grid value distribution:`);
+  console.log(`  - 0 (none): ${valueCounts[0]} points`);
+  console.log(`  - 1 (elevated): ${valueCounts[1]} points`);
+  console.log(`  - 2 (minor): ${valueCounts[2]} points`);
+  console.log(`  - 3 (moderate): ${valueCounts[3]} points`);
+  console.log(`  - 4 (major): ${valueCounts[4]} points`);
+  console.log(`  - 5 (extreme): ${valueCounts[5]} points`);
 
   // Generate isobands for each category threshold
   const contourStart = Date.now();
@@ -905,10 +928,37 @@ function createSmoothContours(
         });
 
         if (categoryBand && categoryBand.geometry) {
-          // isobands returns MultiPolygon geometries
+          // Apply buffer in/out to close gaps and create smooth blob-like edges
+          // Buffer out by 5km, then in by 4km (net +1km but smooths edges)
+          let smoothedGeom = categoryBand.geometry as Polygon | MultiPolygon;
+
+          try {
+            const bufferedOut = turf.buffer(
+              { type: 'Feature', geometry: smoothedGeom, properties: {} },
+              5,
+              { units: 'kilometers' }
+            );
+
+            if (bufferedOut && bufferedOut.geometry) {
+              const bufferedIn = turf.buffer(
+                bufferedOut,
+                -4,
+                { units: 'kilometers' }
+              );
+
+              if (bufferedIn && bufferedIn.geometry) {
+                smoothedGeom = bufferedIn.geometry as Polygon | MultiPolygon;
+                console.log(`[WSSI] Applied buffer smoothing to ${category}`);
+              }
+            }
+          } catch (bufferErr) {
+            console.warn(`[WSSI] Buffer smoothing failed for ${category}:`, bufferErr);
+            // Keep original geometry if buffer fails
+          }
+
           smoothBands[category] = {
             type: 'Feature',
-            geometry: categoryBand.geometry as Polygon | MultiPolygon,
+            geometry: smoothedGeom,
             properties: categoryBand.properties || {},
           };
           console.log(`[WSSI] Created isoband for ${category}`);
@@ -969,7 +1019,7 @@ function processWSSIData(
   // === SMOOTH CONTOURING APPROACH ===
   // Convert angular county-based polygons into smooth organic blobs
   // using grid sampling and isoband generation
-  const cellSize = resolution === 'overview' ? 0.2 : 0.15; // degrees
+  const cellSize = resolution === 'overview' ? 0.15 : 0.1; // degrees - smaller = smoother
   const smoothBands = createSmoothContours(rawBands, cellSize);
 
   // Process each smooth band
