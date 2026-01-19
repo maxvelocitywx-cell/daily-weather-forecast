@@ -954,6 +954,18 @@ function createSmoothContours(
       // Use isobands to create filled regions
       const isobands = turf.isobands(grid, [minVal, maxVal], { zProperty: 'value' });
 
+      // Early simplification for performance - reduce vertex count immediately
+      for (let i = 0; i < isobands.features.length; i++) {
+        try {
+          const simplified = turf.simplify(isobands.features[i], { tolerance: 0.05, highQuality: false });
+          if (simplified && simplified.geometry) {
+            (isobands.features[i] as Feature).geometry = simplified.geometry;
+          }
+        } catch {
+          // Keep original if simplify fails
+        }
+      }
+
       console.log(`[WSSI] Isobands for ${category} (${minVal}-${maxVal}): ${isobands.features.length} features`);
       isobands.features.forEach((f, i) => {
         const props = f.properties as { value?: string } | undefined;
@@ -1035,15 +1047,15 @@ function createSmoothContours(
           }
 
           // === STEP 4: Buffer out then in to round corners (pillow effect) ===
-          // Buffer amounts scale inversely with severity:
-          // - Low severity (elevated/minor) = LARGE buffer to merge blobs together
+          // Buffer amounts reduced for performance (avoid 504 timeouts)
+          // - Low severity (elevated/minor) = moderate buffer for smoothing
           // - High severity (major/extreme) = NO buffer, preserve original shape
           function getBufferAmounts(cat: WSSICategory): { out: number; inAmt: number; minArea: number } | null {
             switch (cat) {
               case 'elevated':
-                return { out: 25, inAmt: 20, minArea: 200 }; // Large buffer to merge blobs
+                return { out: 12, inAmt: 10, minArea: 200 }; // Reduced from 25/20 for performance
               case 'minor':
-                return { out: 20, inAmt: 16, minArea: 150 }; // Large buffer to merge blobs
+                return { out: 10, inAmt: 8, minArea: 150 };  // Reduced from 20/16 for performance
               case 'moderate':
                 return { out: 3, inAmt: 2, minArea: 100 };   // Keep small
               case 'major':
@@ -1051,7 +1063,7 @@ function createSmoothContours(
               case 'extreme':
                 return null; // No buffer - preserve small polygons
               default:
-                return { out: 8, inAmt: 6, minArea: 150 };
+                return { out: 6, inAmt: 5, minArea: 150 };
             }
           }
 
@@ -1256,8 +1268,9 @@ function processWSSIData(
   // using grid sampling and isoband generation
   // Pipeline: coarse grid → simplify → Chaikin smooth → buffer round = soft pillow shapes
   // Larger cellSize = more generalized blobby shapes (less geographic detail)
-  // Use FINER grid (0.15°) to capture small high-severity polygons like Major/Extreme
-  const cellSize = resolution === 'overview' ? 0.15 : 0.12; // degrees - finer grid to capture small polygons
+  // Use coarser grid for performance (avoid 504 timeouts)
+  // 0.2° grid still captures Major/Extreme polygons while being much faster
+  const cellSize = resolution === 'overview' ? 0.2 : 0.15; // degrees - coarser for performance
   const smoothBands = createSmoothContours(rawBands, cellSize);
 
   // === BYPASS FOR MAJOR/EXTREME ===
@@ -1326,9 +1339,6 @@ function processWSSIData(
   let totalVertices = 0;
   let totalComponents = 0;
 
-  // Categories to apply extra merging (union overlapping parts after buffer expansion)
-  const categoriesToMerge: WSSICategory[] = ['elevated', 'minor'];
-
   for (const category of CATEGORY_ORDER) {
     const band = smoothBands[category];
     if (!band?.geometry) continue;
@@ -1354,41 +1364,8 @@ function processWSSIData(
     }
     smoothedBand = fragCleaned;
 
-    // For elevated/minor: merge any overlapping/touching MultiPolygon parts
-    // The large buffer (25km/20km) may have caused separate blobs to touch
-    if (categoriesToMerge.includes(category) && smoothedBand.geometry.type === 'MultiPolygon') {
-      console.log(`[WSSI] Merging ${category} MultiPolygon components...`);
-      try {
-        // Use union to merge any overlapping polygons within this MultiPolygon
-        const polygons = smoothedBand.geometry.coordinates;
-        if (polygons.length > 1) {
-          // Convert each polygon to a feature and union them
-          let merged: Feature<Polygon | MultiPolygon> | null = turf.polygon(polygons[0]);
-          for (let i = 1; i < polygons.length; i++) {
-            const nextPoly = turf.polygon(polygons[i]);
-            const unionResult = turf.union(turf.featureCollection([merged, nextPoly]));
-            if (unionResult) {
-              merged = unionResult as Feature<Polygon | MultiPolygon>;
-            }
-          }
-          if (merged && merged.geometry) {
-            const beforeCount = polygons.length;
-            const afterCount = merged.geometry.type === 'MultiPolygon'
-              ? merged.geometry.coordinates.length
-              : 1;
-            console.log(`[WSSI] ${category} merged: ${beforeCount} -> ${afterCount} polygons`);
-            smoothedBand = {
-              type: 'Feature',
-              geometry: merged.geometry,
-              properties: smoothedBand.properties,
-            };
-          }
-        }
-      } catch (mergeErr) {
-        console.warn(`[WSSI] Failed to merge ${category}:`, mergeErr);
-        // Keep original if merge fails
-      }
-    }
+    // NOTE: Removed slow union/merge operation for performance
+    // The buffer expansion alone provides smoothing without expensive turf.union calls
 
     const riskInfo = WSSI_TO_RISK[category];
     const { vertices, components } = countGeometry(smoothedBand);
