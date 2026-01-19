@@ -1436,8 +1436,110 @@ export async function GET(
   const { searchParams } = new URL(request.url);
   const res = searchParams.get('res') as 'overview' | 'detail' | null;
   const resolution = res === 'detail' ? 'detail' : 'overview';
+  const debug = searchParams.get('debug') === 'true';
 
-  console.log(`[WSSI] Request: day=${day}, res=${resolution}`);
+  console.log(`[WSSI] Request: day=${day}, res=${resolution}, debug=${debug}`);
+
+  // === DEBUG ENDPOINT ===
+  // Returns raw diagnostic info instead of processed GeoJSON
+  if (debug) {
+    const layerId = WSSI_LAYER_IDS[day];
+    const queryUrl = `${MAPSERVER_BASE}/${layerId}/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`;
+
+    try {
+      const response = await fetch(queryUrl, {
+        headers: { 'User-Agent': 'maxvelocitywx.com' },
+      });
+
+      if (!response.ok) {
+        return NextResponse.json({ error: `NOAA API error: ${response.status}` }, { status: 500 });
+      }
+
+      const rawData = await response.json() as FeatureCollection;
+
+      // Collect all unique impact values
+      const impactValues = new Set<string>();
+      const allPropertyKeys = new Set<string>();
+
+      for (const feature of rawData.features || []) {
+        const props = feature.properties || {};
+        Object.keys(props).forEach(k => allPropertyKeys.add(k));
+        if (props.impact) impactValues.add(String(props.impact));
+        if (props.Impact) impactValues.add(String(props.Impact));
+        if (props.IMPACT) impactValues.add(String(props.IMPACT));
+      }
+
+      // Map each feature to its category
+      const mappedCategories: Record<string, number> = {
+        elevated: 0,
+        minor: 0,
+        moderate: 0,
+        major: 0,
+        extreme: 0,
+        unmapped: 0,
+      };
+
+      const featureDetails: Array<{
+        index: number;
+        impact: string;
+        mappedCategory: string | null;
+        geometryType: string;
+        areaKm2: number;
+      }> = [];
+
+      for (let i = 0; i < (rawData.features || []).length; i++) {
+        const f = rawData.features[i];
+        const props = f.properties || {};
+        const impact = String(props.impact || props.Impact || props.IMPACT || 'UNKNOWN');
+        const category = extractCategory(props as Record<string, unknown>);
+        const geomType = f.geometry?.type || 'NO_GEOMETRY';
+
+        let areaKm2 = 0;
+        if (f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon')) {
+          try {
+            areaKm2 = turf.area(f as Feature<Polygon | MultiPolygon>) / 1_000_000;
+          } catch {
+            areaKm2 = -1;
+          }
+        }
+
+        if (category) {
+          mappedCategories[category]++;
+        } else {
+          mappedCategories.unmapped++;
+        }
+
+        featureDetails.push({
+          index: i,
+          impact,
+          mappedCategory: category,
+          geometryType: geomType,
+          areaKm2: Math.round(areaKm2),
+        });
+      }
+
+      return NextResponse.json({
+        noaaUrl: queryUrl,
+        layerId,
+        rawFeatureCount: rawData.features?.length || 0,
+        propertyKeys: [...allPropertyKeys],
+        uniqueImpactValues: [...impactValues],
+        mappedCategories,
+        featureDetails,
+        sampleFeatureProperties: rawData.features?.[0]?.properties || null,
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        },
+      });
+    } catch (error) {
+      return NextResponse.json({
+        error: 'Failed to fetch NOAA data',
+        details: error instanceof Error ? error.message : String(error),
+      }, { status: 500 });
+    }
+  }
 
   try {
     // Step 1: Get Last-Modified to build cache key
