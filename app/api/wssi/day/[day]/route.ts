@@ -1270,6 +1270,16 @@ function processWSSIData(
   const cellSize = resolution === 'overview' ? 0.08 : 0.06;
   const smoothBands = createSmoothContours(rawBands, cellSize);
 
+  // Minimum area thresholds by category (km²)
+  // Filter out small isolated polygons that create visual noise
+  const minAreaKm2: Record<WSSICategory, number> = {
+    elevated: 5000,  // Only show elevated areas > 5000 km²
+    minor: 2000,     // Only show minor areas > 2000 km²
+    moderate: 500,   // Only show moderate areas > 500 km²
+    major: 100,      // Keep smaller major areas
+    extreme: 50,     // Keep smaller extreme areas
+  };
+
   // Process each smooth band
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
@@ -1279,7 +1289,16 @@ function processWSSIData(
     const band = smoothBands[category];
     if (!band?.geometry) continue;
 
-    console.log(`[WSSI] Processing ${category}...`);
+    // Check area against threshold
+    const areaKm2 = turf.area(band) / 1_000_000;
+    const threshold = minAreaKm2[category];
+
+    if (areaKm2 < threshold) {
+      console.log(`[WSSI] Filtering out ${category}: area ${areaKm2.toFixed(0)} km² < threshold ${threshold} km²`);
+      continue;
+    }
+
+    console.log(`[WSSI] Processing ${category}: area ${areaKm2.toFixed(0)} km² (threshold: ${threshold} km²)`);
 
     const riskInfo = WSSI_TO_RISK[category];
     const { vertices, components } = countGeometry(band);
