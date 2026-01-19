@@ -88,7 +88,15 @@ export default function WSSIClient() {
       sourceAdded.current = true;
     }
 
+    // Find the first label/symbol layer to insert our layers below it
+    // This ensures WSSI polygons render underneath city names, roads, and other map features
+    const layers = map.current.getStyle().layers;
+    const labelLayerId = layers.find(
+      (layer) => layer.type === 'symbol' && (layer.layout as Record<string, unknown>)?.['text-field']
+    )?.id;
+
     // Add fill layer with 0.40 opacity as specified
+    // Insert BEFORE labelLayerId so it renders underneath labels
     map.current.addLayer({
       id: 'wssi-fill',
       type: 'fill',
@@ -98,7 +106,7 @@ export default function WSSIClient() {
         'fill-opacity': 0.40,
         'fill-antialias': false, // Test: disable antialiasing to debug hollow circle
       },
-    });
+    }, labelLayerId);
 
     // Add halo outline (wider, semi-transparent for glow effect)
     map.current.addLayer({
@@ -115,7 +123,7 @@ export default function WSSIClient() {
         'line-join': 'round',
         'line-cap': 'round',
       },
-    });
+    }, labelLayerId);
 
     // Add main outline
     map.current.addLayer({
@@ -131,7 +139,7 @@ export default function WSSIClient() {
         'line-join': 'round',
         'line-cap': 'round',
       },
-    });
+    }, labelLayerId);
 
     // Hover effects
     map.current.on('mouseenter', 'wssi-fill', () => {
