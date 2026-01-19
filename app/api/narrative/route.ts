@@ -1,11 +1,36 @@
 import { NextResponse } from 'next/server';
-import { headers } from 'next/headers';
 import OpenAI from 'openai';
-import { REGIONS, REGION_IDS } from '@/lib/regions';
 import { NarrativeResponse, NationalNarrative, RegionNarrative } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
+
+/**
+ * Fetch WPC Extended Forecast Discussion
+ * https://www.wpc.ncep.noaa.gov/discussions/pmdepd.html
+ */
+async function fetchWPCDiscussion(): Promise<string | null> {
+  try {
+    // WPC provides the discussion in plain text format
+    const response = await fetch('https://www.wpc.ncep.noaa.gov/discussions/pmdepd.txt', {
+      headers: {
+        'User-Agent': 'MaxVelocityWX (weather@example.com)',
+      },
+      next: { revalidate: 21600 }, // Cache for 6 hours
+    });
+
+    if (!response.ok) {
+      console.error('WPC discussion fetch failed:', response.status);
+      return null;
+    }
+
+    const text = await response.text();
+    return text;
+  } catch (error) {
+    console.error('Error fetching WPC discussion:', error);
+    return null;
+  }
+}
 
 /**
  * GET /api/narrative
@@ -26,8 +51,11 @@ export async function GET(request: Request) {
     const requestUrl = new URL(request.url);
     const baseUrl = `${requestUrl.protocol}//${requestUrl.host}`;
 
-    // Fetch current forecast data
-    const forecastRes = await fetch(`${baseUrl}/api/forecast`);
+    // Fetch WPC discussion and forecast data in parallel
+    const [wpcDiscussion, forecastRes] = await Promise.all([
+      fetchWPCDiscussion(),
+      fetch(`${baseUrl}/api/forecast`),
+    ]);
 
     if (!forecastRes.ok) {
       throw new Error('Failed to fetch forecast data');
@@ -76,44 +104,85 @@ export async function GET(request: Request) {
       return details.join('\n');
     }).join('\n\n');
 
-    // Generate national narrative
-    const nationalPrompt = `You are a professional meteorologist writing a detailed weather synopsis for the United States.
+    // Generate national narrative using WPC discussion
+    const wpcContext = wpcDiscussion
+      ? `\nWPC EXTENDED FORECAST DISCUSSION (official NWS source):\n${wpcDiscussion.slice(0, 4000)}\n`
+      : '';
+
+    const nationalPrompt = `You are a professional meteorologist summarizing the national weather outlook.
+
+${wpcContext}
 
 CURRENT WEATHER DATA BY REGION:
 ${regionDetails}
 
-National Summary:
-- Overall Risk Level: ${forecast.national.level} (${forecast.national.overallRisk}/10)
-- Active Regions: ${forecast.national.activeRegions.join(', ') || 'None with elevated risk'}
-
 INSTRUCTIONS:
-Write a detailed 2-paragraph national weather outlook based on the ACTUAL DATA above:
+Based on the WPC Extended Forecast Discussion above (if available) and the regional weather data, provide:
 
-Paragraph 1: Lead with the most significant weather story. Mention specific cities, temperatures, precipitation amounts (snow/rain totals), and wind speeds from the data. Focus on areas with active weather first.
+1. WEATHER HIGHLIGHTS AND HAZARDS: Write a 2-3 paragraph summary of the main weather story across the US. Focus on:
+   - Active weather systems and their impacts
+   - Significant hazards (winter storms, severe weather, flooding, etc.)
+   - Temperature patterns and anomalies
+   - Mention specific cities and regions affected
 
-Paragraph 2: Cover the quieter regions with their temperature ranges and conditions. Mention specific cities and their expected highs/lows.
+2. Then provide exactly 3-5 bullet point HIGHLIGHTS (short, impactful statements about key weather features)
 
-IMPORTANT: Use the specific numbers and city names from the data above. Do not invent conditions - only reference what's in the data. Be professional and factual. No emojis.`;
+Format your response EXACTLY as:
+SUMMARY:
+[2-3 paragraphs of weather highlights and hazards]
+
+HIGHLIGHTS:
+• [First highlight - most significant weather story]
+• [Second highlight]
+• [Third highlight]
+• [Fourth highlight if warranted]
+• [Fifth highlight if warranted]
+
+Be professional, specific, and factual. Reference the WPC discussion content when available. No emojis.`;
 
     const nationalResponse = await client.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [{ role: 'user', content: nationalPrompt }],
-      max_tokens: 500,
-      temperature: 0.7,
+      max_tokens: 800,
+      temperature: 0.5,
     });
 
     const nationalText = nationalResponse.choices[0]?.message?.content || '';
-    const nationalParagraphs = nationalText.split('\n\n').filter(p => p.trim());
+
+    // Parse the response
+    const summaryMatch = nationalText.match(/SUMMARY:\s*([\s\S]*?)(?=HIGHLIGHTS:|$)/i);
+    const highlightsMatch = nationalText.match(/HIGHLIGHTS:\s*([\s\S]*)/i);
+
+    const overviewText = summaryMatch?.[1]?.trim() || nationalText;
+
+    // Extract bullet points from highlights
+    const highlightsText = highlightsMatch?.[1] || '';
+    const highlights = highlightsText
+      .split(/[•\-\*]/)
+      .map((h: string) => h.trim())
+      .filter((h: string) => h.length > 10)
+      .slice(0, 5);
+
+    // If no highlights extracted, generate from active regions
+    const finalHighlights = highlights.length > 0
+      ? highlights
+      : forecast.national.activeRegions.map((regionId: string) => {
+          const region = forecast.regions.find((r: any) => r.region.id === regionId);
+          return region ? `${region.region.name}: ${region.risk.headline}` : '';
+        }).filter(Boolean).slice(0, 5);
+
+    // Add fallback highlights if still empty
+    if (finalHighlights.length === 0) {
+      finalHighlights.push('Quiet weather pattern across much of the US');
+      finalHighlights.push('No significant hazards expected');
+    }
 
     const nationalNarrative: NationalNarrative = {
       headline: forecast.national.activeRegions.length > 0
         ? `Active weather across ${forecast.national.activeRegions.length} region${forecast.national.activeRegions.length > 1 ? 's' : ''}`
         : 'Quiet conditions nationwide',
-      overview: nationalParagraphs.join('\n\n'),
-      highlights: forecast.national.activeRegions.map((regionId: string) => {
-        const region = forecast.regions.find((r: any) => r.region.id === regionId);
-        return region ? `${region.region.name}: ${region.risk.headline}` : '';
-      }).filter(Boolean),
+      overview: overviewText,
+      highlights: finalHighlights,
     };
 
     // Generate regional narratives (in parallel)
