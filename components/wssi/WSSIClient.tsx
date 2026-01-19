@@ -278,6 +278,27 @@ export default function WSSIClient() {
       className: 'wssi-popup',
     });
 
+    // Inject CSS for popup styling (more reliable than styled-jsx)
+    if (!document.getElementById('wssi-popup-styles')) {
+      const style = document.createElement('style');
+      style.id = 'wssi-popup-styles';
+      style.textContent = `
+        .wssi-popup .mapboxgl-popup-content {
+          background: rgba(15, 15, 20, 0.95);
+          color: white;
+          padding: 0;
+          border-radius: 8px;
+          font-size: 14px;
+          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        .wssi-popup .mapboxgl-popup-tip {
+          border-top-color: rgba(15, 15, 20, 0.95);
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
     map.current.on('load', () => {
       console.log('[WSSI] Map loaded');
       addWSSILayers();
@@ -759,19 +780,6 @@ export default function WSSIClient() {
           </div>
         </div>
       )}
-
-      <style jsx global>{`
-        .wssi-popup .mapboxgl-popup-content {
-          background: rgba(15, 15, 20, 0.95);
-          border: 1px solid rgba(255, 255, 255, 0.1);
-          border-radius: 8px;
-          padding: 0;
-          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-        }
-        .wssi-popup .mapboxgl-popup-tip {
-          border-top-color: rgba(15, 15, 20, 0.95);
-        }
-      `}</style>
     </div>
   );
 }
