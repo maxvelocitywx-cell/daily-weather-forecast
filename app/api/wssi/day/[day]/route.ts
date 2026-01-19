@@ -856,6 +856,10 @@ function processWSSIData(
 
     console.log(`[WSSI] Processing ${category}...`);
 
+    // === TEMPORARILY DISABLED: Return RAW unprocessed data ===
+    // Skip ALL processing to see original NOAA polygons
+
+    /*
     // === SMOOTHING PIPELINE USING TURF.JS (WGS84) ===
     // This is more robust than JSTS with EPSG:3857
 
@@ -894,17 +898,21 @@ function processWSSIData(
     } catch {
       continue;
     }
+    */
+
+    // Use RAW band directly - no smoothing, no sanitization
+    const rawBand = band;
 
     const riskInfo = WSSI_TO_RISK[category];
-    const { vertices, components } = countGeometry(smoothedBand);
+    const { vertices, components } = countGeometry(rawBand);
     totalVertices += vertices;
     totalComponents += components;
 
-    console.log(`[WSSI] ${category}: ${vertices} vertices, ${components} components`);
+    console.log(`[WSSI] ${category} (RAW): ${vertices} vertices, ${components} components`);
 
     processedFeatures.push({
       type: 'Feature',
-      geometry: smoothedBand.geometry,
+      geometry: rawBand.geometry,
       properties: {
         day,
         category,
