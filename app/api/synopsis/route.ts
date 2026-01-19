@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { generateUSWeatherSynopsis } from "@/lib/us-weather-synopsis";
+import { CITIES } from "@/lib/cities";
+import { fetchOpenMeteoForecast } from "@/lib/openMeteo";
+import { RegionId } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -17,49 +20,210 @@ function dayName(offsetDays: number) {
   return estDate.toLocaleDateString("en-US", { weekday: "long" });
 }
 
+// Map synopsis region IDs to app region IDs
+const SYNOPSIS_REGION_MAP: Record<string, { appRegions: RegionId[]; states: string }> = {
+  west_coast: {
+    appRegions: ['northwest', 'southwest'],
+    states: 'California, Oregon, Washington, Idaho, Nevada, Arizona, Utah',
+  },
+  rockies: {
+    appRegions: ['northern_plains', 'southwest'],
+    states: 'New Mexico, Colorado, Wyoming, Montana',
+  },
+  great_plains: {
+    appRegions: ['northern_plains', 'southern_plains'],
+    states: 'North Dakota, South Dakota, Nebraska, Kansas, Oklahoma, Texas, Arkansas, Louisiana',
+  },
+  midwest: {
+    appRegions: ['midwest'],
+    states: 'Minnesota, Iowa, Missouri, Illinois, Indiana, Ohio, Michigan, Wisconsin',
+  },
+  northeast: {
+    appRegions: ['northeast'],
+    states: 'Pennsylvania, New York, New Jersey, Rhode Island, Connecticut, Massachusetts, New Hampshire, Vermont, Maine',
+  },
+  southeast: {
+    appRegions: ['southeast'],
+    states: 'Kentucky, Tennessee, Mississippi, Alabama, Georgia, Florida, South Carolina, North Carolina, Virginia, West Virginia, Washington DC, Maryland, Delaware',
+  },
+};
+
+// Get sample cities for each synopsis region
+function getCitiesForSynopsisRegion(synopsisRegionId: string): typeof CITIES {
+  const mapping = SYNOPSIS_REGION_MAP[synopsisRegionId];
+  if (!mapping) return [];
+
+  const cities = CITIES.filter(city => mapping.appRegions.includes(city.regionId));
+  // Sample up to 10 cities per region for performance
+  return cities.slice(0, 10);
+}
+
+interface CityWeatherData {
+  name: string;
+  state: string;
+  days: Array<{
+    tmax: number;
+    tmin: number;
+    rain: number;
+    snow: number;
+    windGust: number;
+    weatherCode: number;
+  }>;
+}
+
+async function fetchRegionWeatherData(synopsisRegionId: string): Promise<CityWeatherData[]> {
+  const cities = getCitiesForSynopsisRegion(synopsisRegionId);
+  const results: CityWeatherData[] = [];
+
+  // Fetch weather for each city (in parallel for speed)
+  const promises = cities.map(async (city) => {
+    try {
+      const data = await fetchOpenMeteoForecast(city.lat, city.lon, {
+        hourly: false,
+        daily: true,
+        days: 7,
+      });
+
+      if (!data.daily) return null;
+
+      const days = data.daily.time.slice(0, 7).map((_, i) => ({
+        tmax: Math.round(data.daily!.temperature_2m_max[i] || 50),
+        tmin: Math.round(data.daily!.temperature_2m_min[i] || 30),
+        rain: Math.round((data.daily!.rain_sum?.[i] || data.daily!.precipitation_sum?.[i] || 0) * 100) / 100,
+        snow: Math.round((data.daily!.snowfall_sum?.[i] || 0) * 10) / 10,
+        windGust: Math.round(data.daily!.wind_gusts_10m_max?.[i] || 0),
+        weatherCode: data.daily!.weather_code?.[i] || 0,
+      }));
+
+      return {
+        name: city.name,
+        state: city.state,
+        days,
+      };
+    } catch {
+      return null;
+    }
+  });
+
+  const resolved = await Promise.all(promises);
+  for (const result of resolved) {
+    if (result) results.push(result);
+  }
+
+  return results;
+}
+
+function buildRegionContext(synopsisRegionId: string, cityData: CityWeatherData[]): string {
+  const mapping = SYNOPSIS_REGION_MAP[synopsisRegionId];
+  if (!mapping || cityData.length === 0) {
+    return `${synopsisRegionId.toUpperCase().replace('_', ' ')} (${mapping?.states || 'Unknown'}): Limited data available.`;
+  }
+
+  const regionName = synopsisRegionId.toUpperCase().replace('_', ' ');
+  let context = `${regionName} (${mapping.states}):\n`;
+
+  // Build context for each day (1-3 for detailed, 4-7 for summary)
+  for (let day = 0; day < 3; day++) {
+    const dayLabel = `Day ${day + 1}`;
+
+    // Aggregate data for this day
+    const tmaxs = cityData.map(c => c.days[day]?.tmax || 50);
+    const tmins = cityData.map(c => c.days[day]?.tmin || 30);
+    const rains = cityData.map(c => c.days[day]?.rain || 0);
+    const snows = cityData.map(c => c.days[day]?.snow || 0);
+    const gusts = cityData.map(c => c.days[day]?.windGust || 0);
+
+    const avgHigh = Math.round(tmaxs.reduce((a, b) => a + b, 0) / tmaxs.length);
+    const avgLow = Math.round(tmins.reduce((a, b) => a + b, 0) / tmins.length);
+    const maxHigh = Math.max(...tmaxs);
+    const minLow = Math.min(...tmins);
+    const maxRain = Math.max(...rains);
+    const maxSnow = Math.max(...snows);
+    const maxGust = Math.max(...gusts);
+    const avgGust = Math.round(gusts.reduce((a, b) => a + b, 0) / gusts.length);
+
+    // Build city-specific details
+    const cityDetails: string[] = [];
+    for (const city of cityData.slice(0, 5)) {
+      const d = city.days[day];
+      if (!d) continue;
+      let detail = `${city.name} highs ${d.tmax}°F, lows ${d.tmin}°F`;
+      if (d.snow > 0.5) detail += `, ${d.snow}" snow`;
+      else if (d.rain > 0.25) detail += `, ${d.rain}" rain`;
+      if (d.windGust >= 30) detail += `, gusts to ${d.windGust} mph`;
+      cityDetails.push(detail);
+    }
+
+    context += `${dayLabel}: `;
+    context += `Highs ${minLow < avgHigh - 15 ? `ranging from upper ${Math.floor(minLow / 10) * 10}s to ` : ''}${Math.floor(avgHigh / 10) * 10}s`;
+    if (maxHigh - avgHigh > 10) context += ` (up to ${maxHigh}°F in some areas)`;
+    context += `, lows in the ${Math.floor(avgLow / 10) * 10}s. `;
+
+    if (maxSnow >= 1) {
+      const snowCities = cityData.filter(c => (c.days[day]?.snow || 0) >= 0.5).map(c => c.name);
+      context += `Snow expected${snowCities.length > 0 ? ` for ${snowCities.slice(0, 3).join(', ')}` : ''} with accumulations up to ${maxSnow}". `;
+    } else if (maxRain >= 0.25) {
+      const rainCities = cityData.filter(c => (c.days[day]?.rain || 0) >= 0.1).map(c => c.name);
+      context += `Rain expected${rainCities.length > 0 ? ` for ${rainCities.slice(0, 3).join(', ')}` : ''} with totals up to ${maxRain}". `;
+    } else {
+      context += `Dry conditions expected. `;
+    }
+
+    if (maxGust >= 30) {
+      context += `Winds gusting to ${maxGust} mph. `;
+    } else if (avgGust >= 15) {
+      context += `Winds ${avgGust}-${maxGust} mph. `;
+    } else {
+      context += `Light winds. `;
+    }
+
+    // Add specific city details
+    if (cityDetails.length > 0) {
+      context += cityDetails.slice(0, 3).join('. ') + '. ';
+    }
+    context += '\n';
+  }
+
+  // Days 4-7 summary
+  const day4to7Data = cityData.flatMap(c => c.days.slice(3, 7));
+  if (day4to7Data.length > 0) {
+    const avgHighLong = Math.round(day4to7Data.reduce((a, d) => a + (d?.tmax || 50), 0) / day4to7Data.length);
+    const totalSnow = day4to7Data.reduce((a, d) => a + (d?.snow || 0), 0);
+    const totalRain = day4to7Data.reduce((a, d) => a + (d?.rain || 0), 0);
+
+    context += `Days 4-7: Temperatures averaging near ${avgHighLong}°F. `;
+    if (totalSnow > 1) {
+      context += `Additional snow chances with possible accumulations. `;
+    } else if (totalRain > 0.5) {
+      context += `Some rain chances through the period. `;
+    } else {
+      context += `Generally dry conditions expected. `;
+    }
+    context += '\n';
+  }
+
+  return context;
+}
+
 export async function GET() {
-  // TEMP TEST CONTEXT (replace later with real SPC/WPC/NWS context)
-  const context = `
-Weather Context for US Regions:
+  // Fetch real weather data for all regions
+  const synopsisRegions = ['west_coast', 'rockies', 'great_plains', 'midwest', 'northeast', 'southeast'];
 
-WEST COAST (California, Oregon, Washington, Idaho, Nevada, Arizona, Utah):
-Day 1: Mild and dry across most of the West Coast. Highs in the 50s-60s for coastal California, 40s-50s for the Pacific Northwest. Seattle and Portland see partly cloudy skies. Light winds at 5-10 mph. Some morning fog possible in California's Central Valley reducing visibility. Phoenix and Las Vegas remain sunny with highs in the low 60s.
-Day 2: A weak system brings light rain to Seattle and Portland, 0.1-0.3 inches expected. Boise sees a mix of clouds and sun. Dry and mild in California with highs near 60 in LA and San Francisco. Salt Lake City partly cloudy with highs in the low 40s.
-Day 3: Clearing in the Pacific Northwest with sunshine returning. Dry conditions persist across the Southwest. Phoenix sees highs near 65, Las Vegas in the low 50s. Winds remain light region-wide.
-Days 4-7: Pattern remains quiet with near-normal temperatures and minimal precipitation chances across the region.
+  const regionDataPromises = synopsisRegions.map(async (regionId) => {
+    const cityData = await fetchRegionWeatherData(regionId);
+    return { regionId, cityData };
+  });
 
-ROCKIES (New Mexico, Colorado, Wyoming, Montana):
-Day 1: Cool and quiet across the Rockies. Denver highs in the upper 30s, lows in the teens. Light winds at 5-10 mph. Some high clouds but dry conditions. Billings cold with highs only in the 20s. Albuquerque milder with highs near 50.
-Day 2: A clipper system brings light snow to Montana and northern Wyoming, 1-3 inches possible in the mountains around Billings and Bozeman. Denver remains dry with highs in the low 40s. Winds increase to 15-20 mph.
-Day 3: Snow showers taper off in Montana. Cold nights continue with lows in the single digits for Montana and teens for Wyoming. Denver sees partly cloudy skies with highs in the upper 30s.
-Days 4-7: Temperatures trend slightly above normal. Dry conditions expected through the period across the Rockies.
+  const regionResults = await Promise.all(regionDataPromises);
 
-GREAT PLAINS (North Dakota, South Dakota, Nebraska, Kansas, Oklahoma, Texas, Arkansas, Louisiana):
-Day 1: Seasonably cool across the Plains. Highs in the 30s-40s for the Dakotas and Nebraska, 50s for Oklahoma and Texas. Winds light out of the north at 5-10 mph. Dallas sees highs near 50, Houston in the upper 50s. Mostly sunny skies.
-Day 2: A reinforcing cold front drops temperatures. Highs only in the 20s for the Dakotas, 40s for Kansas and Nebraska. Winds increase to 15-25 mph creating wind chills in the teens for Fargo and Sioux Falls. Some light rain possible in Louisiana, under 0.25 inches.
-Day 3: Cold but dry across the northern Plains. Omaha highs in the mid-30s, Oklahoma City near 50. Dallas rebounds to the mid-50s. Winds diminish to 5-10 mph. New Orleans sees highs in the low 50s.
-Days 4-7: Gradual warming trend with temperatures returning to near normal by day 6 across the region.
+  // Build context from real weather data
+  let context = 'Weather Context for US Regions (based on current forecast data):\n\n';
 
-MIDWEST (Minnesota, Iowa, Missouri, Illinois, Indiana, Ohio, Michigan, Wisconsin):
-Day 1: Lake-effect snow continues downwind of the Great Lakes. Cleveland could see 2-4 inches, with 1-2 inches for Detroit. Chicago dry but cold, highs in the low 30s. Minneapolis highs in the upper 20s. Winds 10-20 mph.
-Day 2: Lake-effect snow tapers off. Cold and blustery with highs in the 20s-30s region-wide. Winds 15-25 mph with gusts to 35 mph making it feel like the teens. Indianapolis and Columbus highs near 30.
-Day 3: Clearing skies. Detroit highs near 35, Minneapolis in the upper 20s, Chicago in the low 30s. Calmer winds at 5-10 mph.
-Days 4-7: Quiet pattern with temperatures near to slightly above normal across the Midwest.
+  for (const { regionId, cityData } of regionResults) {
+    context += buildRegionContext(regionId, cityData) + '\n';
+  }
 
-NORTHEAST (Pennsylvania, New York, New Jersey, Rhode Island, Connecticut, Massachusetts, New Hampshire, Vermont, Maine):
-Day 1: Rain spreads into NYC and Boston by morning, changing to snow inland across upstate NY, Vermont, and New Hampshire by late afternoon. Coastal wind gusts 40-45 mph creating dangerous conditions. Snow accumulations: Syracuse 4-6 inches, Albany 3-5 inches, Burlington 5-8 inches. Philadelphia and NYC see rain only, 0.5-1 inch. Portland, ME gets a mix of rain and snow.
-Day 2: Cold and blustery with scattered snow showers. Highs in the 30s, lows in the 20s region-wide. Winds 15-25 mph with gusts to 35 mph. Light accumulations under 1 inch for most areas. Travel remains difficult in higher elevations.
-Day 3: Clearing skies and calming winds. Boston highs in the upper 30s, NYC near 40, Philadelphia in the low 40s. Much calmer conditions return to the region.
-Days 4-7: Gradual warming trend with temperatures approaching 45-50 by day 6. Dry conditions expected throughout the Northeast.
-
-SOUTHEAST (Kentucky, Tennessee, Mississippi, Alabama, Georgia, Florida, South Carolina, North Carolina, Virginia, West Virginia, Washington DC, Maryland, Delaware):
-Day 1: Mild and dry across the Southeast. Atlanta highs in the upper 50s, Miami near 75, Charlotte in the mid-50s. Light winds at 5-10 mph. Nashville sees partly cloudy skies with highs in the upper 40s.
-Day 2: Slight cool-down as a weak front passes. Highs in the 50s for Tennessee, Kentucky, and the Carolinas, 70s for Florida. Richmond and DC see highs in the upper 40s. Light rain possible in Virginia, under 0.1 inches.
-Day 3: Dry conditions continue. Charlotte highs near 55, Tampa in the low 70s, Atlanta in the mid-50s. Winds remain light. Jacksonville sees highs in the upper 60s.
-Days 4-7: Quiet weather pattern with temperatures near normal across the Southeast.
-
-IMPORTANT: You MUST generate forecast data for ALL 6 regions in this exact order: west_coast, rockies, great_plains, midwest, northeast, southeast.
-  `;
+  context += '\nIMPORTANT: You MUST generate forecast data for ALL 6 regions in this exact order: west_coast, rockies, great_plains, midwest, northeast, southeast. Use the actual weather data provided above - do not invent conditions.\n';
 
   const data = await generateUSWeatherSynopsis(context);
 
