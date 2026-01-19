@@ -107,12 +107,16 @@ type PolygonFeature = Feature<Polygon | MultiPolygon>;
 /**
  * Extract WSSI category from feature properties
  */
-function extractCategory(properties: Record<string, unknown>): WSSICategory | null {
+function extractCategory(properties: Record<string, unknown>, debug: boolean = false): WSSICategory | null {
   const possibleProps = ['impact', 'idp_wssilabel', 'label', 'Label', 'LABEL', 'name', 'Name'];
 
   for (const prop of possibleProps) {
     if (properties[prop]) {
       const value = String(properties[prop]).toLowerCase().trim();
+
+      if (debug) {
+        console.log(`[WSSI] extractCategory: prop="${prop}", raw="${properties[prop]}", normalized="${value}"`);
+      }
 
       if (value === 'extreme' || value === 'extreme impacts') return 'extreme';
       if (value === 'major' || value === 'major impacts') return 'major';
@@ -125,6 +129,10 @@ function extractCategory(properties: Record<string, unknown>): WSSICategory | nu
       if (value.includes('moderate')) return 'moderate';
       if (value.includes('minor')) return 'minor';
       if (value.includes('elevated') || value.includes('winter weather')) return 'elevated';
+
+      if (debug) {
+        console.log(`[WSSI] extractCategory: NO MATCH for value="${value}"`);
+      }
     }
   }
 
@@ -1198,14 +1206,30 @@ function processWSSIData(
     extreme: [],
   };
 
+  let featureIdx = 0;
   for (const feature of rawFeatures) {
-    if (!feature.geometry) continue;
-    if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') continue;
+    if (!feature.geometry) {
+      console.log(`[WSSI] Feature ${featureIdx}: skipped - no geometry`);
+      featureIdx++;
+      continue;
+    }
+    if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') {
+      console.log(`[WSSI] Feature ${featureIdx}: skipped - geometry type ${feature.geometry.type}`);
+      featureIdx++;
+      continue;
+    }
 
-    const category = extractCategory((feature.properties || {}) as Record<string, unknown>);
-    if (!category) continue;
+    // Enable debug for first 5 features
+    const category = extractCategory((feature.properties || {}) as Record<string, unknown>, featureIdx < 5);
+    if (!category) {
+      console.log(`[WSSI] Feature ${featureIdx}: skipped - no category match, props: ${JSON.stringify(feature.properties).slice(0, 200)}`);
+      featureIdx++;
+      continue;
+    }
 
+    console.log(`[WSSI] Feature ${featureIdx}: mapped to "${category}"`);
     featuresByCategory[category].push(feature as PolygonFeature);
+    featureIdx++;
   }
 
   console.log(`[WSSI] Features by mapped category: elevated=${featuresByCategory.elevated.length}, minor=${featuresByCategory.minor.length}, moderate=${featuresByCategory.moderate.length}, major=${featuresByCategory.major.length}, extreme=${featuresByCategory.extreme.length}`);
@@ -1329,6 +1353,7 @@ async function fetchRawWSSI(day: number): Promise<{ features: Feature[]; lastMod
   if (!layerId) throw new Error(`Invalid day: ${day}`);
 
   const queryUrl = `${MAPSERVER_BASE}/${layerId}/query?where=1%3D1&outFields=*&f=geojson&returnGeometry=true`;
+  console.log(`[WSSI] Fetching from NOAA: ${queryUrl}`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000); // 25s timeout
@@ -1349,6 +1374,35 @@ async function fetchRawWSSI(day: number): Promise<{ features: Feature[]; lastMod
       || response.headers.get('Date')
       || new Date().toISOString();
     const rawData = await response.json() as FeatureCollection;
+
+    // === DETAILED DEBUG LOGGING ===
+    console.log(`[WSSI] Raw NOAA response: ${rawData.features?.length || 0} features`);
+
+    // Log ALL unique impact values found
+    const impactValues = new Set<string>();
+    const propertyKeys = new Set<string>();
+
+    for (const feature of rawData.features || []) {
+      const props = feature.properties || {};
+      // Collect all property keys
+      Object.keys(props).forEach(k => propertyKeys.add(k));
+      // Collect impact values
+      if (props.impact) impactValues.add(String(props.impact));
+      if (props.Impact) impactValues.add(String(props.Impact));
+      if (props.IMPACT) impactValues.add(String(props.IMPACT));
+    }
+
+    console.log(`[WSSI] All property keys in response: ${[...propertyKeys].join(', ')}`);
+    console.log(`[WSSI] All unique impact values: ${[...impactValues].join(', ')}`);
+
+    // Log each feature's impact value and geometry type
+    for (let i = 0; i < (rawData.features || []).length; i++) {
+      const f = rawData.features[i];
+      const props = f.properties || {};
+      const geomType = f.geometry?.type || 'NO_GEOMETRY';
+      const impact = props.impact || props.Impact || props.IMPACT || 'UNKNOWN';
+      console.log(`[WSSI] Feature ${i}: impact="${impact}", geometry=${geomType}`);
+    }
 
     return {
       features: rawData.features || [],
