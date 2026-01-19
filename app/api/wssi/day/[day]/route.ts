@@ -946,6 +946,13 @@ function createSmoothContours(
       // Use isobands to create filled regions
       const isobands = turf.isobands(grid, [minVal, maxVal], { zProperty: 'value' });
 
+      console.log(`[WSSI] Isobands for ${category} (${minVal}-${maxVal}): ${isobands.features.length} features`);
+      isobands.features.forEach((f, i) => {
+        const props = f.properties as { value?: string } | undefined;
+        const fArea = f.geometry ? turf.area(f as Feature<Polygon | MultiPolygon>) / 1_000_000 : 0;
+        console.log(`  Feature ${i}: value="${props?.value}", area=${fArea.toFixed(0)} km²`);
+      });
+
       if (isobands.features.length > 0) {
         // Find the band that represents this category (value between minVal and maxVal)
         const categoryBand = isobands.features.find(f => {
@@ -954,6 +961,9 @@ function createSmoothContours(
         });
 
         if (categoryBand && categoryBand.geometry) {
+          const initialArea = turf.area(categoryBand as Feature<Polygon | MultiPolygon>) / 1_000_000;
+          console.log(`[WSSI] Found ${category} band with initial area: ${initialArea.toFixed(0)} km²`);
+
           // === STEP 1: Simplify first to reduce vertices ===
           let workingFeature: PolygonFeature = {
             type: 'Feature',
@@ -1017,29 +1027,48 @@ function createSmoothContours(
           }
 
           // === STEP 4: Buffer out then in to round corners (pillow effect) ===
+          // BUT skip for small polygons - negative buffer would eliminate them
           let finalFeature: PolygonFeature = {
             type: 'Feature',
             geometry: smoothedGeom,
             properties: categoryBand.properties || {},
           };
 
-          try {
-            // Buffer out 10km then in 8km = net +2km but rounds all corners
-            const bufferedOut = turf.buffer(finalFeature, 10, { units: 'kilometers' });
-            if (bufferedOut && bufferedOut.geometry) {
-              const bufferedIn = turf.buffer(bufferedOut, -8, { units: 'kilometers' });
-              if (bufferedIn && bufferedIn.geometry) {
-                finalFeature = {
-                  type: 'Feature',
-                  geometry: bufferedIn.geometry as Polygon | MultiPolygon,
-                  properties: categoryBand.properties || {},
-                };
-                console.log(`[WSSI] Applied buffer rounding to ${category}`);
+          // Check area BEFORE buffering
+          const preBufferArea = turf.area(finalFeature) / 1_000_000; // km²
+          console.log(`[WSSI] ${category} pre-buffer area: ${preBufferArea.toFixed(0)} km²`);
+
+          // Only apply buffer rounding if polygon is large enough (> 500 km²)
+          // Small polygons would be eliminated by the -8km buffer
+          if (preBufferArea > 500) {
+            try {
+              // Buffer out 10km then in 8km = net +2km but rounds all corners
+              const bufferedOut = turf.buffer(finalFeature, 10, { units: 'kilometers' });
+              if (bufferedOut && bufferedOut.geometry) {
+                const bufferedIn = turf.buffer(bufferedOut, -8, { units: 'kilometers' });
+                if (bufferedIn && bufferedIn.geometry) {
+                  const postBufferArea = turf.area(bufferedIn) / 1_000_000;
+                  // Only use buffered result if it still has reasonable area
+                  if (postBufferArea > 100) {
+                    finalFeature = {
+                      type: 'Feature',
+                      geometry: bufferedIn.geometry as Polygon | MultiPolygon,
+                      properties: categoryBand.properties || {},
+                    };
+                    console.log(`[WSSI] Applied buffer rounding to ${category} (${preBufferArea.toFixed(0)} -> ${postBufferArea.toFixed(0)} km²)`);
+                  } else {
+                    console.log(`[WSSI] Skipped buffer for ${category} - would reduce to ${postBufferArea.toFixed(0)} km²`);
+                  }
+                } else {
+                  console.log(`[WSSI] Buffer in returned null for ${category}, keeping original`);
+                }
               }
+            } catch (bufferErr) {
+              console.warn(`[WSSI] Buffer rounding failed for ${category}:`, bufferErr);
+              // Keep the smoothed geometry if buffer fails
             }
-          } catch (bufferErr) {
-            console.warn(`[WSSI] Buffer rounding failed for ${category}:`, bufferErr);
-            // Keep the smoothed geometry if buffer fails
+          } else {
+            console.log(`[WSSI] Skipped buffer for ${category} - too small (${preBufferArea.toFixed(0)} km²)`);
           }
 
           // === STEP 5: Fix winding order ===
