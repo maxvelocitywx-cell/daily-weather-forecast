@@ -96,6 +96,7 @@ export default function WSSIClient() {
       paint: {
         'fill-color': ['get', 'riskColor'],
         'fill-opacity': 0.40,
+        'fill-antialias': false, // Test: disable antialiasing to debug hollow circle
       },
     });
 

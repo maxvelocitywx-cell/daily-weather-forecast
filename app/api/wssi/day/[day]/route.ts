@@ -1007,6 +1007,31 @@ function createSmoothContours(
 
   console.log(`[WSSI] Generated contours in ${Date.now() - contourStart}ms`);
 
+  // Debug: Log detailed contour info to diagnose hollow circle issue
+  console.log('[WSSI] Contour geometry details:');
+  for (const category of CATEGORY_ORDER) {
+    const band = smoothBands[category];
+    if (!band || !band.geometry) {
+      console.log(`  ${category}: null`);
+      continue;
+    }
+    const geom = band.geometry;
+    if (geom.type === 'Polygon') {
+      console.log(`  ${category}: Polygon with ${geom.coordinates.length} rings (1=solid, >1=has holes)`);
+      geom.coordinates.forEach((ring, i) => {
+        console.log(`    ring ${i}: ${ring.length} vertices`);
+      });
+    } else if (geom.type === 'MultiPolygon') {
+      console.log(`  ${category}: MultiPolygon with ${geom.coordinates.length} polygons`);
+      geom.coordinates.forEach((poly, pi) => {
+        console.log(`    polygon ${pi}: ${poly.length} rings (1=solid, >1=has holes)`);
+        poly.forEach((ring, ri) => {
+          console.log(`      ring ${ri}: ${ring.length} vertices`);
+        });
+      });
+    }
+  }
+
   return smoothBands;
 }
 
