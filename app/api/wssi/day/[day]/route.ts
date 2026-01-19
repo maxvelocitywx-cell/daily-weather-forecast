@@ -973,6 +973,34 @@ function createSmoothContours(
 
           console.log(`[WSSI] Applied Chaikin smoothing to ${category} contour`);
 
+          // Remove holes from polygons - keep only outer rings for solid fills
+          // Isobands creates holes where higher-value regions exist, but we handle
+          // those as separate category layers, so holes just create visual artifacts
+          if (smoothedGeom.type === 'Polygon') {
+            const origRings = smoothedGeom.coordinates.length;
+            if (origRings > 1) {
+              console.log(`[WSSI] Removing ${origRings - 1} holes from ${category} Polygon`);
+              smoothedGeom = {
+                type: 'Polygon',
+                coordinates: [smoothedGeom.coordinates[0]] // Keep only outer ring
+              };
+            }
+          } else if (smoothedGeom.type === 'MultiPolygon') {
+            let totalHolesRemoved = 0;
+            smoothedGeom = {
+              type: 'MultiPolygon',
+              coordinates: smoothedGeom.coordinates.map(polygon => {
+                if (polygon.length > 1) {
+                  totalHolesRemoved += polygon.length - 1;
+                }
+                return [polygon[0]]; // Keep only outer ring of each polygon
+              })
+            };
+            if (totalHolesRemoved > 0) {
+              console.log(`[WSSI] Removed ${totalHolesRemoved} holes from ${category} MultiPolygon`);
+            }
+          }
+
           // Fix winding order after smoothing - ensures polygons render as fills, not holes
           let finalFeature: PolygonFeature = {
             type: 'Feature',
