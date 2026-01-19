@@ -1109,6 +1109,39 @@ function processWSSIData(
 
   const params = SMOOTH_PARAMS[resolution];
 
+  // Debug: Log raw NOAA feature properties to understand category mapping
+  console.log(`[WSSI] Raw NOAA features: ${rawFeatures.length} total`);
+  const rawCategoryCounts: Record<string, number> = {};
+  const unmappedProps: string[] = [];
+
+  for (const feature of rawFeatures) {
+    const props = feature.properties || {};
+    // Check all possible category properties
+    const possibleValues = [
+      props.impact,
+      props.idp_wssilabel,
+      props.label,
+      props.Label,
+      props.LABEL,
+      props.name,
+      props.Name,
+    ].filter(Boolean);
+
+    const catValue = possibleValues[0] ? String(possibleValues[0]) : 'UNKNOWN';
+    rawCategoryCounts[catValue] = (rawCategoryCounts[catValue] || 0) + 1;
+
+    // Log first few unmapped features
+    const category = extractCategory(props as Record<string, unknown>);
+    if (!category && unmappedProps.length < 3) {
+      unmappedProps.push(JSON.stringify(props).slice(0, 200));
+    }
+  }
+
+  console.log('[WSSI] Raw NOAA categories found:', rawCategoryCounts);
+  if (unmappedProps.length > 0) {
+    console.log('[WSSI] Unmapped feature props samples:', unmappedProps);
+  }
+
   // Group features by category
   const featuresByCategory: Record<WSSICategory, PolygonFeature[]> = {
     elevated: [],
@@ -1127,6 +1160,8 @@ function processWSSIData(
 
     featuresByCategory[category].push(feature as PolygonFeature);
   }
+
+  console.log(`[WSSI] Features by mapped category: elevated=${featuresByCategory.elevated.length}, minor=${featuresByCategory.minor.length}, moderate=${featuresByCategory.moderate.length}, major=${featuresByCategory.major.length}, extreme=${featuresByCategory.extreme.length}`);
 
   // Union features within each category (dissolve)
   const rawBands: Record<WSSICategory, PolygonFeature | null> = {
