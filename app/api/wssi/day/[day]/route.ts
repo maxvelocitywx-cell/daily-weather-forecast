@@ -1273,11 +1273,64 @@ function processWSSIData(
   // Minimum area thresholds by category (km²)
   // Filter out small isolated polygons that create visual noise
   const minAreaKm2: Record<WSSICategory, number> = {
-    elevated: 5000,  // Only show elevated areas > 5000 km²
+    elevated: 3000,  // Only show elevated areas > 3000 km²
     minor: 2000,     // Only show minor areas > 2000 km²
     moderate: 500,   // Only show moderate areas > 500 km²
     major: 100,      // Keep smaller major areas
     extreme: 50,     // Keep smaller extreme areas
+  };
+
+  // Function to remove small polygons WITHIN MultiPolygons
+  // This removes the small isolated circles that are part of a larger MultiPolygon
+  const removeSmallPolygonsWithin = (
+    feature: PolygonFeature,
+    minAreaKm2Value: number
+  ): PolygonFeature | null => {
+    const minAreaM2 = minAreaKm2Value * 1_000_000;
+    const geom = feature.geometry;
+
+    if (geom.type === 'Polygon') {
+      const area = turf.area(feature);
+      return area >= minAreaM2 ? feature : null;
+    }
+
+    if (geom.type === 'MultiPolygon') {
+      // Filter out small polygons within the MultiPolygon
+      const originalCount = geom.coordinates.length;
+      const filteredCoords = geom.coordinates.filter(polygonCoords => {
+        try {
+          const poly = turf.polygon(polygonCoords);
+          const area = turf.area(poly);
+          return area >= minAreaM2;
+        } catch {
+          return false; // Remove invalid polygons
+        }
+      });
+
+      const removedCount = originalCount - filteredCoords.length;
+      if (removedCount > 0) {
+        console.log(`[WSSI] Removed ${removedCount} small polygons from MultiPolygon (threshold: ${minAreaKm2Value} km²)`);
+      }
+
+      if (filteredCoords.length === 0) return null;
+
+      if (filteredCoords.length === 1) {
+        // Convert to single Polygon
+        return {
+          type: 'Feature',
+          geometry: { type: 'Polygon', coordinates: filteredCoords[0] },
+          properties: feature.properties,
+        };
+      }
+
+      return {
+        type: 'Feature',
+        geometry: { type: 'MultiPolygon', coordinates: filteredCoords },
+        properties: feature.properties,
+      };
+    }
+
+    return feature;
   };
 
   // Process each smooth band
@@ -1286,19 +1339,21 @@ function processWSSIData(
   let totalComponents = 0;
 
   for (const category of CATEGORY_ORDER) {
-    const band = smoothBands[category];
+    let band = smoothBands[category];
     if (!band?.geometry) continue;
 
-    // Check area against threshold
-    const areaKm2 = turf.area(band) / 1_000_000;
     const threshold = minAreaKm2[category];
 
-    if (areaKm2 < threshold) {
-      console.log(`[WSSI] Filtering out ${category}: area ${areaKm2.toFixed(0)} km² < threshold ${threshold} km²`);
+    // Remove small polygons WITHIN the MultiPolygon first
+    band = removeSmallPolygonsWithin(band, threshold);
+    if (!band) {
+      console.log(`[WSSI] Filtering out ${category}: all polygons below threshold ${threshold} km²`);
       continue;
     }
 
-    console.log(`[WSSI] Processing ${category}: area ${areaKm2.toFixed(0)} km² (threshold: ${threshold} km²)`);
+    // Check total area
+    const areaKm2 = turf.area(band) / 1_000_000;
+    console.log(`[WSSI] Processing ${category}: total area ${areaKm2.toFixed(0)} km² (threshold: ${threshold} km²)`);
 
     const riskInfo = WSSI_TO_RISK[category];
     const { vertices, components } = countGeometry(band);
