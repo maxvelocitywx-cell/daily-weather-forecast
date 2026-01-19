@@ -21,7 +21,7 @@ export function NationalSummary({
   selectedDay,
   onDayChange,
 }: NationalSummaryProps) {
-  const { narrative, isLoading: narrativeLoading } = useForecastText('national');
+  const { data: narrativeData, narrative, isLoading: narrativeLoading } = useForecastText('national');
 
   // Calculate national average risk for each day
   const nationalRiskByDay = useMemo(() => {
@@ -102,10 +102,49 @@ export function NationalSummary({
               <div className="h-4 bg-mv-bg-tertiary rounded w-5/6" />
               <div className="h-4 bg-mv-bg-tertiary rounded w-4/6" />
             </div>
-          ) : narrative ? (
-            <p className="text-sm text-mv-text-secondary leading-relaxed">
-              {narrative}
-            </p>
+          ) : narrativeData?.national ? (
+            <div className="space-y-4">
+              {/* Time Updated */}
+              {narrativeData.meta?.generatedAt && (
+                <div className="text-xs text-mv-text-muted uppercase tracking-wider">
+                  Updated: {new Date(narrativeData.meta.generatedAt).toLocaleString('en-US', {
+                    weekday: 'short',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    timeZoneName: 'short',
+                  })}
+                </div>
+              )}
+
+              {/* Weather Highlights and Hazards */}
+              <div>
+                <h3 className="text-xs font-semibold text-mv-text-muted uppercase tracking-wider mb-2">
+                  Weather Highlights & Hazards
+                </h3>
+                <div className="text-sm text-mv-text-secondary leading-relaxed whitespace-pre-line">
+                  {narrativeData.national.overview}
+                </div>
+              </div>
+
+              {/* Highlights */}
+              {narrativeData.national.highlights && narrativeData.national.highlights.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-white/5">
+                  <h3 className="text-xs font-semibold text-mv-text-muted uppercase tracking-wider mb-2">
+                    Key Highlights
+                  </h3>
+                  <ul className="space-y-1.5">
+                    {narrativeData.national.highlights.map((highlight: string, index: number) => (
+                      <li key={index} className="flex items-start gap-2 text-sm text-mv-text-secondary">
+                        <span className="text-mv-accent mt-0.5">•</span>
+                        <span>{highlight}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
           ) : (
             <p className="text-sm text-mv-text-muted italic">
               Weather synopsis loading...
