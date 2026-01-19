@@ -63,25 +63,20 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
 };
 
 // Smoothing parameters - ALL VALUES IN METERS
-// Pipeline: pre-simplify (light) -> Chaikin smoothing ONLY (no buffer, no post-simplify)
-// Goal: FULLY ROUNDED boundaries with NO corners or straight edges
+// Pipeline: pre-simplify -> Chaikin smoothing (reduced for speed)
+// OPTIMIZED FOR VERCEL 10 SECOND LIMIT
 const SMOOTH_PARAMS = {
   overview: {
-    // Pre-simplify: VERY LIGHT - just remove duplicate points, not shape
-    // 3km was too aggressive and creating jagged edges BEFORE Chaikin could smooth
-    preSimplifyMeters: 500,         // 0.5km - minimal, preserves shape for Chaikin
-    // Chaikin smoothing iterations (each iteration cuts corners)
-    // More iterations = smoother curves, but more vertices
-    chaikinIterations: 6,           // 6 iterations for smooth curves
-    // NO post-simplify - it destroys the smooth curves
+    preSimplifyMeters: 2000,        // 2km - more aggressive for speed
+    chaikinIterations: 3,           // Reduced from 6 for speed
     postSimplifyMeters: 0,          // DISABLED
-    minAreaKm2: 50,                 // Reduced from 400 - allow smaller polygons like Major (1296 km²)
+    minAreaKm2: 100,                // Filter small polygons early
   },
   detail: {
-    preSimplifyMeters: 500,         // 0.5km - same light pre-simplify
-    chaikinIterations: 6,
+    preSimplifyMeters: 1000,        // 1km pre-simplify
+    chaikinIterations: 4,           // Reduced from 6 for speed
     postSimplifyMeters: 0,          // DISABLED
-    minAreaKm2: 50,                 // Reduced from 400
+    minAreaKm2: 50,
   },
 };
 
