@@ -244,13 +244,25 @@ export const ICE_POINTS_THRESHOLDS = {
 // Regional multipliers for ice - southern regions less prepared for ice
 // Applied to ice points based on region
 export const ICE_REGION_MULTIPLIERS: Record<string, number> = {
-  'southeast': 1.4,        // Much less ice infrastructure
-  'southern_plains': 1.4,  // Much less ice infrastructure
+  'southeast': 2.0,        // Double ice score - much less ice infrastructure
+  'southern_plains': 2.0,  // Double ice score - much less ice infrastructure
   'southwest': 1.3,        // Rare ice events
   'northeast': 1.15,       // More prepared but still impactful
   'midwest': 1.0,          // Baseline - most prepared
   'northern_plains': 1.0,  // Baseline - most prepared
   'northwest': 1.1,        // Moderate preparation
+};
+
+// Regional multipliers for snow - southern regions less prepared for snow
+// Applied to snow points based on region
+export const SNOW_REGION_MULTIPLIERS: Record<string, number> = {
+  'southeast': 2.0,        // Double snow score - much less snow infrastructure
+  'southern_plains': 2.0,  // Double snow score - less prepared for winter weather
+  'southwest': 1.3,        // Rare snow events
+  'northeast': 0.75,       // Reduce by 25% - well prepared, common occurrence
+  'midwest': 1.0,          // Baseline
+  'northern_plains': 1.0,  // Baseline - most prepared
+  'northwest': 1.0,        // Normal preparation
 };
 
 // ============================================================================

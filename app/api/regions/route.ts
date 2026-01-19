@@ -326,7 +326,8 @@ export async function GET() {
             });
 
           // Compute region risk using canonical function
-          const regionRiskResult = computeRegionRisk(dayIdx, cityRiskInputs);
+          // Pass regionId for regional multipliers (SE/Southern Plains 2x snow/ice, NE 0.75x snow)
+          const regionRiskResult = computeRegionRisk(dayIdx, cityRiskInputs, undefined, regionId);
           regionRiskResults.push(regionRiskResult);
 
           // Extract SPC debug info from factors

@@ -23,6 +23,7 @@ import {
   SPC_DAY48_POINTS,
   ICE_POINTS_THRESHOLDS,
   ICE_REGION_MULTIPLIERS,
+  SNOW_REGION_MULTIPLIERS,
 } from './riskTypes';
 
 // ============================================================================
@@ -60,11 +61,15 @@ export interface CityOverlays {
 
 /**
  * Factor: Snow Amount (daily total)
- * Max points: 4.0
+ * Max points: 4.0 (before regional multiplier)
+ * Regional multipliers apply:
+ * - Southeast/Southern Plains: 2.0x (less snow infrastructure)
+ * - Northeast: 0.75x (well prepared, common occurrence)
  */
 function factorSnowAmount(
   snowIn: number,
-  dayIndex: number
+  dayIndex: number,
+  regionId?: string
 ): RiskFactor {
   let points = 0;
   let notes = 'None';
@@ -99,27 +104,38 @@ function factorSnowAmount(
     notes = `${snowIn.toFixed(1)}" extreme`;
   }
 
+  // Apply regional multiplier (southern regions get higher scores, northeast gets reduced)
+  const regionMultiplier = regionId ? (SNOW_REGION_MULTIPLIERS[regionId] || 1.0) : 1.0;
+  const adjustedPoints = points * regionMultiplier;
+
+  // Add multiplier info to notes if applied and non-default
+  const multiplierNote = regionMultiplier !== 1.0
+    ? ` (${regionMultiplier}x regional adjustment)`
+    : '';
+
   return {
     id: 'snow_amount',
     label: 'Snow Accumulation',
     category: 'snow',
     observed: `${snowIn.toFixed(2)}"`,
-    points: round(Math.min(4.0, points), 2),
-    notes,
+    points: round(Math.min(8.0, adjustedPoints), 2), // Cap raised to 8.0 for doubled regions
+    notes: notes + multiplierNote,
     dayIndex,
     scope: 'city',
-    meta: { snowIn },
+    meta: { snowIn, regionMultiplier },
   };
 }
 
 /**
  * Factor: Snow Rate (intensity proxy)
- * Max points: 1.5
+ * Max points: 1.5 (before regional multiplier)
+ * Regional multipliers apply same as snow amount
  */
 function factorSnowRate(
   snowIn: number,
   hourlySnow: number[] | undefined,
-  dayIndex: number
+  dayIndex: number,
+  regionId?: string
 ): RiskFactor {
   let maxHourlySnow = 0;
 
@@ -150,16 +166,25 @@ function factorSnowRate(
     notes = 'Light rate';
   }
 
+  // Apply regional multiplier (southern regions get higher scores, northeast gets reduced)
+  const regionMultiplier = regionId ? (SNOW_REGION_MULTIPLIERS[regionId] || 1.0) : 1.0;
+  const adjustedPoints = points * regionMultiplier;
+
+  // Add multiplier info to notes if applied and non-default
+  const multiplierNote = regionMultiplier !== 1.0
+    ? ` (${regionMultiplier}x regional adjustment)`
+    : '';
+
   return {
     id: 'snow_rate',
     label: 'Snow Rate',
     category: 'snow',
     observed: `${maxHourlySnow.toFixed(2)}"/hr max`,
-    points: round(Math.min(1.5, points), 2),
-    notes,
+    points: round(Math.min(3.0, adjustedPoints), 2), // Cap raised to 3.0 for doubled regions
+    notes: notes + multiplierNote,
     dayIndex,
     scope: 'city',
-    meta: { maxHourlySnow },
+    meta: { maxHourlySnow, regionMultiplier },
   };
 }
 
@@ -1007,8 +1032,9 @@ export function computeCityRisk(
   const dayIdx = Math.max(1, Math.min(7, dayIndex));
 
   // ===== SNOW FACTORS =====
-  factors.push(factorSnowAmount(cityForecast.snow_in, dayIdx));
-  factors.push(factorSnowRate(cityForecast.snow_in, cityForecast.hourlySnow, dayIdx));
+  // Regional multipliers apply: SE/Southern Plains 2x, Northeast 0.75x
+  factors.push(factorSnowAmount(cityForecast.snow_in, dayIdx, regionId));
+  factors.push(factorSnowRate(cityForecast.snow_in, cityForecast.hourlySnow, dayIdx, regionId));
 
   // ===== RAIN FACTORS =====
   factors.push(factorRainAmount(cityForecast.rain_in, dayIdx));

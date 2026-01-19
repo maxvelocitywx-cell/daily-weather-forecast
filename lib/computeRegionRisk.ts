@@ -42,6 +42,8 @@ import {
   WSSI_ORDER,
   SPC_DAY48_POINTS,
   SPC_DAY48_ORDER,
+  SNOW_REGION_MULTIPLIERS,
+  ICE_REGION_MULTIPLIERS,
 } from './riskTypes';
 
 // ============================================================================
@@ -320,8 +322,9 @@ function factorCityRiskDistribution(
 }
 
 /**
- * Factor: Max City Risk (capped impact boost)
- * High-impact cities get some weight but don't dominate
+ * Factor: Max City Risk (heavily capped impact boost)
+ * High-impact cities should NOT significantly affect regional score
+ * Reduced from 0.2 multiplier / 1.5 cap to 0.08 multiplier / 0.5 cap
  */
 function factorMaxCityRisk(
   cityScores: number[],
@@ -342,9 +345,9 @@ function factorMaxCityRisk(
 
   const max = Math.max(...cityScores);
   const p75 = percentile(cityScores, 75);
-  // Impact boost from outliers, capped
-  const impactBoost = Math.max(0, (max - p75) * 0.2);
-  const points = Math.min(1.5, impactBoost);
+  // Heavily reduced impact boost from outliers - high city scores shouldn't dominate
+  const impactBoost = Math.max(0, (max - p75) * 0.08);
+  const points = Math.min(0.5, impactBoost);
 
   return {
     id: 'city_risk_max',
@@ -352,7 +355,7 @@ function factorMaxCityRisk(
     category: 'distribution',
     observed: `max: ${round(max, 1)}/10`,
     points: round(points, 2),
-    notes: max >= 7 ? 'High-impact city' : max >= 5 ? 'Elevated impact' : 'No significant outliers',
+    notes: max >= 7 ? 'High-impact city (capped)' : max >= 5 ? 'Elevated impact (capped)' : 'No significant outliers',
     dayIndex,
     scope: 'region',
     meta: { max, p75, impactBoost },
@@ -361,10 +364,12 @@ function factorMaxCityRisk(
 
 /**
  * Factor: Snow Hazard (p90 + coverage)
+ * Regional multipliers apply: SE/Southern Plains 2x, Northeast 0.75x
  */
 function factorSnowHazard(
   metrics: RegionWeatherMetrics,
-  dayIndex: number
+  dayIndex: number,
+  regionId?: string
 ): RiskFactor {
   const { snow_p90, snow_max, snow_coverage, snow_trace_coverage, cityCount } = metrics;
 
@@ -406,6 +411,15 @@ function factorSnowHazard(
     points += 0.15;
   }
 
+  // Apply regional multiplier (southern regions get higher scores, northeast gets reduced)
+  const regionMultiplier = regionId ? (SNOW_REGION_MULTIPLIERS[regionId] || 1.0) : 1.0;
+  const adjustedPoints = points * regionMultiplier;
+
+  // Add multiplier info to notes if applied and non-default
+  const multiplierNote = regionMultiplier !== 1.0
+    ? ` (${regionMultiplier}x regional adjustment)`
+    : '';
+
   const citiesWithSnow = Math.round(snow_coverage * cityCount);
 
   return {
@@ -413,11 +427,11 @@ function factorSnowHazard(
     label: 'Snow Hazard',
     category: 'snow',
     observed: `p90 ${snow_p90.toFixed(1)}" (${citiesWithSnow}/${cityCount} cities >= 1")`,
-    points: round(Math.min(3.5, points), 2),
-    notes,
+    points: round(Math.min(7.0, adjustedPoints), 2), // Cap raised to 7.0 for doubled regions
+    notes: notes + multiplierNote,
     dayIndex,
     scope: 'region',
-    meta: { snow_p90, snow_max, snow_coverage, citiesWithSnow },
+    meta: { snow_p90, snow_max, snow_coverage, citiesWithSnow, regionMultiplier },
   };
 }
 
@@ -483,10 +497,12 @@ function factorRainHazard(
 /**
  * Factor: Ice Hazard (NBM FRAM - p90 + coverage)
  * Ice is extremely hazardous even in small amounts
+ * Regional multipliers apply: SE/Southern Plains 2x (less ice infrastructure)
  */
 function factorIceHazard(
   metrics: RegionWeatherMetrics,
-  dayIndex: number
+  dayIndex: number,
+  regionId?: string
 ): RiskFactor {
   const { ice_p90, ice_max, ice_coverage, ice_heavy_coverage, cityCount } = metrics;
 
@@ -541,6 +557,15 @@ function factorIceHazard(
     points += 0.2;
   }
 
+  // Apply regional multiplier (southern regions get higher scores)
+  const regionMultiplier = regionId ? (ICE_REGION_MULTIPLIERS[regionId] || 1.0) : 1.0;
+  const adjustedPoints = points * regionMultiplier;
+
+  // Add multiplier info to notes if applied and non-default
+  const multiplierNote = regionMultiplier !== 1.0
+    ? ` (${regionMultiplier}x regional adjustment)`
+    : '';
+
   const citiesWithIce = Math.round(ice_coverage * cityCount);
 
   return {
@@ -548,11 +573,11 @@ function factorIceHazard(
     label: 'Ice Accumulation Hazard',
     category: 'ice',
     observed: `p90 ${ice_p90.toFixed(2)}" (${citiesWithIce}/${cityCount} cities >= 0.1")`,
-    points: round(Math.min(3.5, points), 2),
-    notes,
+    points: round(Math.min(7.0, adjustedPoints), 2), // Cap raised to 7.0 for doubled regions
+    notes: notes + multiplierNote,
     dayIndex,
     scope: 'region',
-    meta: { ice_p90, ice_max, ice_coverage, ice_heavy_coverage, citiesWithIce },
+    meta: { ice_p90, ice_max, ice_coverage, ice_heavy_coverage, citiesWithIce, regionMultiplier },
   };
 }
 
@@ -1175,12 +1200,14 @@ function generateRegionSummary(
  * @param dayIndex - 1-7 (Day 1 = today)
  * @param cityRiskResults - Array of city risk results with scores and weather data
  * @param regionMetrics - Pre-computed region weather metrics (or null to compute)
+ * @param regionId - Region identifier for regional multipliers (e.g., 'southeast', 'northeast')
  * @returns RiskScoreResult with factors, score, and explainer
  */
 export function computeRegionRisk(
   dayIndex: number,
   cityRiskResults: CityRiskInput[],
-  regionMetrics?: RegionWeatherMetrics
+  regionMetrics?: RegionWeatherMetrics,
+  regionId?: string
 ): RiskScoreResult {
   const dayIdx = Math.max(1, Math.min(7, dayIndex));
 
@@ -1206,9 +1233,10 @@ export function computeRegionRisk(
   factors.push(factorMaxCityRisk(cityScores, dayIdx));
 
   // ===== HAZARD FACTORS =====
-  factors.push(factorSnowHazard(metrics, dayIdx));
+  // Regional multipliers apply: SE/Southern Plains 2x for snow/ice, Northeast 0.75x for snow
+  factors.push(factorSnowHazard(metrics, dayIdx, regionId));
   factors.push(factorRainHazard(metrics, dayIdx));
-  factors.push(factorIceHazard(metrics, dayIdx));  // NBM FRAM ice accumulation
+  factors.push(factorIceHazard(metrics, dayIdx, regionId));  // NBM FRAM ice accumulation
   factors.push(factorWindHazard(metrics, dayIdx));
   factors.push(factorColdHazard(metrics, dayIdx));
   factors.push(factorHeatHazard(metrics, dayIdx));
