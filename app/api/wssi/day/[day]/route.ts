@@ -915,6 +915,32 @@ function createSmoothContours(
     ['extreme', 4.5, 5.5],    // catches value 5
   ];
 
+  // Chaikin smoothing for contour coordinates - creates smooth curves from angular isobands
+  function chaikinSmoothCoords(coords: number[][], iterations: number = 4): number[][] {
+    let result = [...coords];
+    for (let iter = 0; iter < iterations; iter++) {
+      const smoothed: number[][] = [];
+      for (let i = 0; i < result.length - 1; i++) {
+        const p0 = result[i];
+        const p1 = result[i + 1];
+        smoothed.push([
+          0.75 * p0[0] + 0.25 * p1[0],
+          0.75 * p0[1] + 0.25 * p1[1]
+        ]);
+        smoothed.push([
+          0.25 * p0[0] + 0.75 * p1[0],
+          0.25 * p0[1] + 0.75 * p1[1]
+        ]);
+      }
+      // Close the ring
+      if (smoothed.length > 0) {
+        smoothed.push(smoothed[0]);
+      }
+      result = smoothed;
+    }
+    return result;
+  }
+
   for (const [category, minVal, maxVal] of thresholds) {
     try {
       // Use isobands to create filled regions
@@ -928,33 +954,24 @@ function createSmoothContours(
         });
 
         if (categoryBand && categoryBand.geometry) {
-          // Apply buffer in/out to close gaps and create smooth blob-like edges
-          // Buffer out by 5km, then in by 4km (net +1km but smooths edges)
+          // Apply Chaikin smoothing to contour coordinates for smooth curves
           let smoothedGeom = categoryBand.geometry as Polygon | MultiPolygon;
 
-          try {
-            const bufferedOut = turf.buffer(
-              { type: 'Feature', geometry: smoothedGeom, properties: {} },
-              5,
-              { units: 'kilometers' }
-            );
-
-            if (bufferedOut && bufferedOut.geometry) {
-              const bufferedIn = turf.buffer(
-                bufferedOut,
-                -4,
-                { units: 'kilometers' }
-              );
-
-              if (bufferedIn && bufferedIn.geometry) {
-                smoothedGeom = bufferedIn.geometry as Polygon | MultiPolygon;
-                console.log(`[WSSI] Applied buffer smoothing to ${category}`);
-              }
-            }
-          } catch (bufferErr) {
-            console.warn(`[WSSI] Buffer smoothing failed for ${category}:`, bufferErr);
-            // Keep original geometry if buffer fails
+          if (smoothedGeom.type === 'Polygon') {
+            smoothedGeom = {
+              type: 'Polygon',
+              coordinates: smoothedGeom.coordinates.map(ring => chaikinSmoothCoords(ring, 4))
+            };
+          } else if (smoothedGeom.type === 'MultiPolygon') {
+            smoothedGeom = {
+              type: 'MultiPolygon',
+              coordinates: smoothedGeom.coordinates.map(polygon =>
+                polygon.map(ring => chaikinSmoothCoords(ring, 4))
+              )
+            };
           }
+
+          console.log(`[WSSI] Applied Chaikin smoothing to ${category} contour`);
 
           smoothBands[category] = {
             type: 'Feature',
@@ -1019,7 +1036,8 @@ function processWSSIData(
   // === SMOOTH CONTOURING APPROACH ===
   // Convert angular county-based polygons into smooth organic blobs
   // using grid sampling and isoband generation
-  const cellSize = resolution === 'overview' ? 0.15 : 0.1; // degrees - smaller = smoother
+  // Fine grid (0.05°) + Chaikin smoothing on contours = smooth blobs
+  const cellSize = resolution === 'overview' ? 0.08 : 0.05; // degrees - finer = smoother
   const smoothBands = createSmoothContours(rawBands, cellSize);
 
   // Process each smooth band
