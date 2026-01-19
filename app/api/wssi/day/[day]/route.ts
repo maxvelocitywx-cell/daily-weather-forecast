@@ -63,22 +63,23 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
 };
 
 // Smoothing parameters - ALL VALUES IN METERS
-// Pipeline: pre-simplify -> Chaikin smoothing ONLY (no buffer, no post-simplify)
+// Pipeline: pre-simplify (light) -> Chaikin smoothing ONLY (no buffer, no post-simplify)
 // Goal: FULLY ROUNDED boundaries with NO corners or straight edges
 const SMOOTH_PARAMS = {
   overview: {
-    // Pre-simplify: remove grid stair-steps before smoothing
-    preSimplifyMeters: 3000,        // 3km - removes grid artifacts
+    // Pre-simplify: VERY LIGHT - just remove duplicate points, not shape
+    // 3km was too aggressive and creating jagged edges BEFORE Chaikin could smooth
+    preSimplifyMeters: 500,         // 0.5km - minimal, preserves shape for Chaikin
     // Chaikin smoothing iterations (each iteration cuts corners)
     // More iterations = smoother curves, but more vertices
-    chaikinIterations: 5,           // 5 iterations = very smooth curves
+    chaikinIterations: 6,           // 6 iterations for smooth curves
     // NO post-simplify - it destroys the smooth curves
     postSimplifyMeters: 0,          // DISABLED
     minAreaKm2: 400,                // Min area filter
   },
   detail: {
-    preSimplifyMeters: 3000,
-    chaikinIterations: 5,
+    preSimplifyMeters: 500,         // 0.5km - same light pre-simplify
+    chaikinIterations: 6,
     postSimplifyMeters: 0,          // DISABLED
     minAreaKm2: 400,
   },
