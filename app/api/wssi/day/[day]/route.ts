@@ -63,38 +63,38 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
 };
 
 // Smoothing parameters - ALL VALUES IN METERS
-// Pipeline: pre-simplify -> buffer out/in (large) -> buffer out/in (small) -> densify -> post-simplify
+// Pipeline: pre-simplify -> buffer out/in (large) -> buffer out/in (small) -> densify -> NO post-simplify
 // Goal: FULLY ROUNDED boundaries with NO corners or straight edges
 const SMOOTH_PARAMS = {
   overview: {
     // Pre-simplify: aggressive to remove grid stair-steps
-    preSimplifyMeters: 5000,        // 5km - removes grid artifacts
+    preSimplifyMeters: 8000,        // 8km - removes grid artifacts aggressively
     // First buffer pass: LARGE symmetric rounding for smooth curves
-    buffer1OutMeters: 25000,        // 25km out - creates large rounded corners
-    buffer1InMeters: 25000,         // 25km in - symmetric = pure rounding
-    buffer1Steps: 64,               // HIGH step count for very smooth arcs
+    buffer1OutMeters: 30000,        // 30km out - creates large rounded corners
+    buffer1InMeters: 30000,         // 30km in - symmetric = pure rounding
+    buffer1Steps: 128,              // VERY HIGH step count for perfectly smooth arcs
     // Second buffer pass: refinement for any remaining edges
-    buffer2OutMeters: 10000,        // 10km out
-    buffer2InMeters: 10000,         // 10km in
-    buffer2Steps: 64,               // Same high step count
+    buffer2OutMeters: 15000,        // 15km out
+    buffer2InMeters: 15000,         // 15km in
+    buffer2Steps: 128,              // Same very high step count
     // Densification: break up ANY remaining straight segments
-    densifyMaxSegmentMeters: 5000,  // Max 5km segment - shorter = rounder
-    densifyIntervalMeters: 1000,    // Insert points every 1km
-    // Post-simplify: VERY light to preserve curves
-    postSimplifyMeters: 500,        // 0.5km - barely simplify
+    densifyMaxSegmentMeters: 2000,  // Max 2km segment - very short = very round
+    densifyIntervalMeters: 500,     // Insert points every 500m
+    // NO post-simplify - it destroys curves
+    postSimplifyMeters: 0,          // DISABLED - do not simplify after densifying
     minAreaKm2: 400,                // Min area filter
   },
   detail: {
-    preSimplifyMeters: 5000,
-    buffer1OutMeters: 25000,
-    buffer1InMeters: 25000,
-    buffer1Steps: 64,
-    buffer2OutMeters: 10000,
-    buffer2InMeters: 10000,
-    buffer2Steps: 64,
-    densifyMaxSegmentMeters: 5000,
-    densifyIntervalMeters: 1000,
-    postSimplifyMeters: 500,
+    preSimplifyMeters: 8000,
+    buffer1OutMeters: 30000,
+    buffer1InMeters: 30000,
+    buffer1Steps: 128,
+    buffer2OutMeters: 15000,
+    buffer2InMeters: 15000,
+    buffer2Steps: 128,
+    densifyMaxSegmentMeters: 2000,
+    densifyIntervalMeters: 500,
+    postSimplifyMeters: 0,          // DISABLED
     minAreaKm2: 400,
   },
 };
@@ -437,21 +437,25 @@ function smoothGeometryWithTurf(
     result = densifyFeatureWGS84(result, maxSegmentDeg, intervalDeg);
     console.log(`[WSSI] After densify: ${countGeometry(result).vertices} vertices`);
 
-    // Step 6: POST-SIMPLIFY (very light to preserve curves)
-    const postSimplifyDegrees = params.postSimplifyMeters / 111000;
-    try {
-      const postSimplified = turf.simplify(result, {
-        tolerance: postSimplifyDegrees,
-        highQuality: true,
-        mutate: false,
-      });
-      if (postSimplified?.geometry) {
-        result = postSimplified as PolygonFeature;
+    // Step 6: POST-SIMPLIFY - SKIP if set to 0 (preserves all curve detail)
+    if (params.postSimplifyMeters > 0) {
+      const postSimplifyDegrees = params.postSimplifyMeters / 111000;
+      try {
+        const postSimplified = turf.simplify(result, {
+          tolerance: postSimplifyDegrees,
+          highQuality: true,
+          mutate: false,
+        });
+        if (postSimplified?.geometry) {
+          result = postSimplified as PolygonFeature;
+        }
+      } catch (e) {
+        console.warn('[WSSI] Post-simplify failed:', e);
       }
-    } catch (e) {
-      console.warn('[WSSI] Post-simplify failed:', e);
+      console.log(`[WSSI] After post-simplify: ${countGeometry(result).vertices} vertices`);
+    } else {
+      console.log(`[WSSI] Skipping post-simplify (disabled) - keeping ${countGeometry(result).vertices} vertices`);
     }
-    console.log(`[WSSI] After post-simplify: ${countGeometry(result).vertices} vertices`);
 
     console.log(`[WSSI] smoothGeometryWithTurf COMPLETE: ${startVertices} -> ${countGeometry(result).vertices} vertices`);
     return result;
