@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { Snowflake, RefreshCw } from 'lucide-react';
+import { Snowflake, RefreshCw, X, AlertTriangle } from 'lucide-react';
 
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
@@ -24,6 +24,62 @@ const RISK_LEVELS = [
 ];
 
 const DAYS = [1, 2, 3];
+
+// Risk details for modal display
+const RISK_DETAILS: Record<string, { title: string; description: string; impacts: string[] }> = {
+  'Marginal Risk': {
+    title: 'Marginal Risk - Winter Weather Area',
+    description: 'Limited winter weather expected with minimal impacts to travel and daily activities.',
+    impacts: [
+      'Light snow accumulation possible',
+      'Minor travel inconveniences',
+      'Normal precautions advised',
+    ],
+  },
+  'Slight Risk': {
+    title: 'Slight Risk - Minor Impacts',
+    description: 'Minor winter weather impacts expected. Some travel delays possible.',
+    impacts: [
+      'Snow accumulation 1-3 inches likely',
+      'Slippery road conditions',
+      'Plan extra travel time',
+      'Check road conditions before traveling',
+    ],
+  },
+  'Enhanced Risk': {
+    title: 'Enhanced Risk - Moderate Impacts',
+    description: 'Moderate winter storm impacts expected. Significant travel disruptions likely.',
+    impacts: [
+      'Snow accumulation 3-6 inches likely',
+      'Hazardous driving conditions',
+      'Possible power outages',
+      'Consider postponing travel',
+    ],
+  },
+  'Moderate Risk': {
+    title: 'Moderate Risk - Major Impacts',
+    description: 'Major winter storm impacts expected. Dangerous travel conditions.',
+    impacts: [
+      'Heavy snow accumulation 6-12 inches',
+      'Travel extremely hazardous or impossible',
+      'Extended power outages likely',
+      'Stay home if possible',
+      'Stock emergency supplies',
+    ],
+  },
+  'High Risk': {
+    title: 'High Risk - Extreme Impacts',
+    description: 'Extreme winter storm with life-threatening conditions. Travel should be avoided.',
+    impacts: [
+      'Blizzard or ice storm conditions',
+      'Snow accumulation 12+ inches possible',
+      'Widespread power outages expected',
+      'Life-threatening conditions',
+      'Do not travel under any circumstances',
+      'Seek shelter immediately',
+    ],
+  },
+};
 
 interface WSSIGeoJSON {
   type: 'FeatureCollection';
@@ -55,6 +111,7 @@ export default function WSSIClient() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<{ features: number; vertices: number; bytes: number } | null>(null);
+  const [modalData, setModalData] = useState<{ riskLabel: string; riskColor: string; originalLabel: string } | null>(null);
 
   // Refs for fetch control - these prevent loops
   const lastFetchKey = useRef<string | null>(null);
@@ -156,20 +213,43 @@ export default function WSSIClient() {
 
       const feature = e.features[0];
       const props = feature.properties;
+      const riskLabel = props?.riskLabel || 'Unknown';
+      const riskColor = props?.riskColor || '#fff';
+      const originalLabel = props?.originalLabel || '';
 
       popup.current
         .setLngLat(e.lngLat)
         .setHTML(`
-          <div style="padding: 8px;">
-            <div style="font-weight: 600; color: ${props?.riskColor || '#fff'}; margin-bottom: 4px;">
-              ${props?.riskLabel || 'Unknown'}
+          <div style="padding: 12px; min-width: 180px;">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+              <div style="width: 12px; height: 12px; border-radius: 3px; background: ${riskColor}; flex-shrink: 0;"></div>
+              <div style="font-weight: 600; font-size: 14px; color: #fff;">
+                ${riskLabel}
+              </div>
             </div>
-            <div style="font-size: 12px; color: #9CA3AF;">
-              ${props?.originalLabel || ''}
+            <div style="font-size: 12px; color: #9CA3AF; margin-bottom: 8px;">
+              ${originalLabel}
+            </div>
+            <div style="font-size: 11px; color: #6B7280; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 8px;">
+              Click for details
             </div>
           </div>
         `)
         .addTo(map.current);
+    });
+
+    // Click handler - open modal with risk details
+    map.current.on('click', 'wssi-fill', (e) => {
+      if (!e.features?.length) return;
+
+      const feature = e.features[0];
+      const props = feature.properties;
+
+      setModalData({
+        riskLabel: props?.riskLabel || 'Unknown',
+        riskColor: props?.riskColor || '#fff',
+        originalLabel: props?.originalLabel || '',
+      });
     });
 
     layersAdded.current = true;
@@ -597,6 +677,88 @@ export default function WSSIClient() {
           )}
         </main>
       </div>
+
+      {/* Risk Details Modal */}
+      {modalData && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setModalData(null)}
+        >
+          <div
+            className="bg-mv-bg-secondary border border-white/10 rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div
+              className="px-6 py-4 border-b border-white/10"
+              style={{ backgroundColor: `${modalData.riskColor}15` }}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-4 h-4 rounded"
+                    style={{ backgroundColor: modalData.riskColor }}
+                  />
+                  <h2 className="text-lg font-semibold text-mv-text-primary">
+                    {modalData.riskLabel}
+                  </h2>
+                </div>
+                <button
+                  onClick={() => setModalData(null)}
+                  className="p-1 rounded hover:bg-white/10 transition-colors"
+                >
+                  <X size={20} className="text-mv-text-muted" />
+                </button>
+              </div>
+              <p className="text-sm text-mv-text-muted mt-1">
+                {modalData.originalLabel}
+              </p>
+            </div>
+
+            {/* Modal Content */}
+            <div className="px-6 py-4">
+              {RISK_DETAILS[modalData.riskLabel] ? (
+                <>
+                  <p className="text-sm text-mv-text-secondary mb-4">
+                    {RISK_DETAILS[modalData.riskLabel].description}
+                  </p>
+                  <div>
+                    <h3 className="text-xs font-semibold text-mv-text-muted uppercase tracking-wider mb-2">
+                      Expected Impacts
+                    </h3>
+                    <ul className="space-y-2">
+                      {RISK_DETAILS[modalData.riskLabel].impacts.map((impact, idx) => (
+                        <li key={idx} className="flex items-start gap-2 text-sm text-mv-text-secondary">
+                          <AlertTriangle
+                            size={14}
+                            className="flex-shrink-0 mt-0.5"
+                            style={{ color: modalData.riskColor }}
+                          />
+                          {impact}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-mv-text-muted">
+                  No detailed information available for this risk level.
+                </p>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3 bg-white/5 border-t border-white/10">
+              <button
+                onClick={() => setModalData(null)}
+                className="w-full py-2 px-4 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium text-mv-text-primary transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style jsx global>{`
         .wssi-popup .mapboxgl-popup-content {
