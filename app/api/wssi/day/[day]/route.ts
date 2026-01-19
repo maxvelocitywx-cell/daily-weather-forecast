@@ -1002,23 +1002,36 @@ function createSmoothContours(
           }
 
           // === STEP 2: Apply Chaikin smoothing (more iterations for rounder curves) ===
+          // Category-specific iterations: more for elevated/minor = smoother blobs
+          function getChaikinIterations(cat: WSSICategory): number {
+            switch (cat) {
+              case 'elevated': return 8;   // Most smoothing - soft blobs
+              case 'minor': return 8;      // Most smoothing - soft blobs
+              case 'moderate': return 5;   // Medium smoothing
+              case 'major': return 3;      // Light smoothing
+              case 'extreme': return 2;    // Minimal smoothing - preserve detail
+              default: return 5;
+            }
+          }
+
+          const chaikinIters = getChaikinIterations(category);
           let smoothedGeom = workingFeature.geometry as Polygon | MultiPolygon;
 
           if (smoothedGeom.type === 'Polygon') {
             smoothedGeom = {
               type: 'Polygon',
-              coordinates: smoothedGeom.coordinates.map(ring => chaikinSmoothCoords(ring, 7)) // 7 iterations
+              coordinates: smoothedGeom.coordinates.map(ring => chaikinSmoothCoords(ring, chaikinIters))
             };
           } else if (smoothedGeom.type === 'MultiPolygon') {
             smoothedGeom = {
               type: 'MultiPolygon',
               coordinates: smoothedGeom.coordinates.map(polygon =>
-                polygon.map(ring => chaikinSmoothCoords(ring, 7)) // 7 iterations
+                polygon.map(ring => chaikinSmoothCoords(ring, chaikinIters))
               )
             };
           }
 
-          console.log(`[WSSI] Applied Chaikin smoothing (7 iterations) to ${category} contour`);
+          console.log(`[WSSI] Applied Chaikin smoothing (${chaikinIters} iterations) to ${category} contour`);
 
           // === STEP 3: Remove holes from polygons ===
           if (smoothedGeom.type === 'Polygon') {
@@ -1047,23 +1060,23 @@ function createSmoothContours(
           }
 
           // === STEP 4: Buffer out then in to round corners (pillow effect) ===
-          // Buffer amounts reduced for performance (avoid 504 timeouts)
-          // - Low severity (elevated/minor) = moderate buffer for smoothing
+          // Larger buffer for elevated/minor = rounder, softer blob edges
+          // - Low severity (elevated/minor) = large buffer for smooth rounded blobs
           // - High severity (major/extreme) = NO buffer, preserve original shape
           function getBufferAmounts(cat: WSSICategory): { out: number; inAmt: number; minArea: number } | null {
             switch (cat) {
               case 'elevated':
-                return { out: 12, inAmt: 10, minArea: 200 }; // Reduced from 25/20 for performance
+                return { out: 15, inAmt: 12, minArea: 200 }; // Larger buffer = rounder edges
               case 'minor':
-                return { out: 10, inAmt: 8, minArea: 150 };  // Reduced from 20/16 for performance
+                return { out: 12, inAmt: 10, minArea: 150 }; // Larger buffer = rounder edges
               case 'moderate':
-                return { out: 3, inAmt: 2, minArea: 100 };   // Keep small
+                return { out: 5, inAmt: 4, minArea: 100 };   // Medium buffer
               case 'major':
                 return null; // No buffer - preserve small polygons
               case 'extreme':
                 return null; // No buffer - preserve small polygons
               default:
-                return { out: 6, inAmt: 5, minArea: 150 };
+                return { out: 8, inAmt: 6, minArea: 150 };
             }
           }
 
