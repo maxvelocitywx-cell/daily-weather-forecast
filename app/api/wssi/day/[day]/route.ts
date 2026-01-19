@@ -1036,20 +1036,20 @@ function createSmoothContours(
 
           // === STEP 4: Buffer out then in to round corners (pillow effect) ===
           // Buffer amounts scale inversely with severity:
-          // - Low severity (elevated/minor) = large buffer, very blobby shapes
+          // - Low severity (elevated/minor) = LARGE buffer to merge blobs together
           // - High severity (major/extreme) = NO buffer, preserve original shape
           function getBufferAmounts(cat: WSSICategory): { out: number; inAmt: number; minArea: number } | null {
             switch (cat) {
               case 'elevated':
-                return { out: 15, inAmt: 12, minArea: 300 }; // Very blobby, needs 300+ km²
+                return { out: 25, inAmt: 20, minArea: 200 }; // Large buffer to merge blobs
               case 'minor':
-                return { out: 10, inAmt: 8, minArea: 200 };  // Blobby, needs 200+ km²
+                return { out: 20, inAmt: 16, minArea: 150 }; // Large buffer to merge blobs
               case 'moderate':
-                return { out: 3, inAmt: 2, minArea: 100 };   // Light smoothing
+                return { out: 3, inAmt: 2, minArea: 100 };   // Keep small
               case 'major':
-                return null; // Skip buffer entirely - preserve small polygons
+                return null; // No buffer - preserve small polygons
               case 'extreme':
-                return null; // Skip buffer entirely - preserve small polygons
+                return null; // No buffer - preserve small polygons
               default:
                 return { out: 8, inAmt: 6, minArea: 150 };
             }
@@ -1326,6 +1326,9 @@ function processWSSIData(
   let totalVertices = 0;
   let totalComponents = 0;
 
+  // Categories to apply extra merging (union overlapping parts after buffer expansion)
+  const categoriesToMerge: WSSICategory[] = ['elevated', 'minor'];
+
   for (const category of CATEGORY_ORDER) {
     const band = smoothBands[category];
     if (!band?.geometry) continue;
@@ -1350,6 +1353,42 @@ function processWSSIData(
       continue;
     }
     smoothedBand = fragCleaned;
+
+    // For elevated/minor: merge any overlapping/touching MultiPolygon parts
+    // The large buffer (25km/20km) may have caused separate blobs to touch
+    if (categoriesToMerge.includes(category) && smoothedBand.geometry.type === 'MultiPolygon') {
+      console.log(`[WSSI] Merging ${category} MultiPolygon components...`);
+      try {
+        // Use union to merge any overlapping polygons within this MultiPolygon
+        const polygons = smoothedBand.geometry.coordinates;
+        if (polygons.length > 1) {
+          // Convert each polygon to a feature and union them
+          let merged: Feature<Polygon | MultiPolygon> | null = turf.polygon(polygons[0]);
+          for (let i = 1; i < polygons.length; i++) {
+            const nextPoly = turf.polygon(polygons[i]);
+            const unionResult = turf.union(turf.featureCollection([merged, nextPoly]));
+            if (unionResult) {
+              merged = unionResult as Feature<Polygon | MultiPolygon>;
+            }
+          }
+          if (merged && merged.geometry) {
+            const beforeCount = polygons.length;
+            const afterCount = merged.geometry.type === 'MultiPolygon'
+              ? merged.geometry.coordinates.length
+              : 1;
+            console.log(`[WSSI] ${category} merged: ${beforeCount} -> ${afterCount} polygons`);
+            smoothedBand = {
+              type: 'Feature',
+              geometry: merged.geometry,
+              properties: smoothedBand.properties,
+            };
+          }
+        }
+      } catch (mergeErr) {
+        console.warn(`[WSSI] Failed to merge ${category}:`, mergeErr);
+        // Keep original if merge fails
+      }
+    }
 
     const riskInfo = WSSI_TO_RISK[category];
     const { vertices, components } = countGeometry(smoothedBand);
