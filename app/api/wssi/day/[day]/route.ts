@@ -75,13 +75,13 @@ const SMOOTH_PARAMS = {
     chaikinIterations: 6,           // 6 iterations for smooth curves
     // NO post-simplify - it destroys the smooth curves
     postSimplifyMeters: 0,          // DISABLED
-    minAreaKm2: 400,                // Min area filter
+    minAreaKm2: 50,                 // Reduced from 400 - allow smaller polygons like Major (1296 km²)
   },
   detail: {
     preSimplifyMeters: 500,         // 0.5km - same light pre-simplify
     chaikinIterations: 6,
     postSimplifyMeters: 0,          // DISABLED
-    minAreaKm2: 400,
+    minAreaKm2: 50,                 // Reduced from 400
   },
 };
 
@@ -1037,19 +1037,19 @@ function createSmoothContours(
           // === STEP 4: Buffer out then in to round corners (pillow effect) ===
           // Buffer amounts scale inversely with severity:
           // - Low severity (elevated/minor) = large buffer, very blobby shapes
-          // - High severity (major/extreme) = small buffer, more precise shapes
-          function getBufferAmounts(cat: WSSICategory): { out: number; inAmt: number; minArea: number } {
+          // - High severity (major/extreme) = NO buffer, preserve original shape
+          function getBufferAmounts(cat: WSSICategory): { out: number; inAmt: number; minArea: number } | null {
             switch (cat) {
               case 'elevated':
                 return { out: 15, inAmt: 12, minArea: 300 }; // Very blobby, needs 300+ km²
               case 'minor':
-                return { out: 12, inAmt: 10, minArea: 200 }; // Blobby, needs 200+ km²
+                return { out: 10, inAmt: 8, minArea: 200 };  // Blobby, needs 200+ km²
               case 'moderate':
-                return { out: 6, inAmt: 5, minArea: 100 };   // Medium smoothing
+                return { out: 3, inAmt: 2, minArea: 100 };   // Light smoothing
               case 'major':
-                return { out: 3, inAmt: 2, minArea: 50 };    // Tighter to data
+                return null; // Skip buffer entirely - preserve small polygons
               case 'extreme':
-                return { out: 1, inAmt: 0.5, minArea: 20 };  // Most precise
+                return null; // Skip buffer entirely - preserve small polygons
               default:
                 return { out: 8, inAmt: 6, minArea: 150 };
             }
@@ -1064,37 +1064,43 @@ function createSmoothContours(
           // Check area BEFORE buffering
           const preBufferArea = turf.area(finalFeature) / 1_000_000; // km²
           const bufferConfig = getBufferAmounts(category);
-          console.log(`[WSSI] ${category} pre-buffer area: ${preBufferArea.toFixed(0)} km², buffer config: out=${bufferConfig.out}km, in=${bufferConfig.inAmt}km, minArea=${bufferConfig.minArea}km²`);
 
-          // Only apply buffer if polygon is large enough for this category's buffer
-          if (preBufferArea > bufferConfig.minArea) {
-            try {
-              const bufferedOut = turf.buffer(finalFeature, bufferConfig.out, { units: 'kilometers' });
-              if (bufferedOut && bufferedOut.geometry) {
-                const bufferedIn = turf.buffer(bufferedOut, -bufferConfig.inAmt, { units: 'kilometers' });
-                if (bufferedIn && bufferedIn.geometry) {
-                  const postBufferArea = turf.area(bufferedIn) / 1_000_000;
-                  // Only use buffered result if it still has reasonable area (> 10 km²)
-                  if (postBufferArea > 10) {
-                    finalFeature = {
-                      type: 'Feature',
-                      geometry: bufferedIn.geometry as Polygon | MultiPolygon,
-                      properties: categoryBand.properties || {},
-                    };
-                    console.log(`[WSSI] Applied buffer rounding to ${category} (${preBufferArea.toFixed(0)} -> ${postBufferArea.toFixed(0)} km²)`);
-                  } else {
-                    console.log(`[WSSI] Skipped buffer for ${category} - would reduce to ${postBufferArea.toFixed(0)} km²`);
-                  }
-                } else {
-                  console.log(`[WSSI] Buffer in returned null for ${category}, keeping original`);
-                }
-              }
-            } catch (bufferErr) {
-              console.warn(`[WSSI] Buffer rounding failed for ${category}:`, bufferErr);
-              // Keep the smoothed geometry if buffer fails
-            }
+          // Skip buffer for major/extreme (bufferConfig is null)
+          if (!bufferConfig) {
+            console.log(`[WSSI] ${category} pre-buffer area: ${preBufferArea.toFixed(0)} km², SKIPPING buffer (high severity category)`);
           } else {
-            console.log(`[WSSI] Skipped buffer for ${category} - area ${preBufferArea.toFixed(0)} km² < minArea ${bufferConfig.minArea} km²`);
+            console.log(`[WSSI] ${category} pre-buffer area: ${preBufferArea.toFixed(0)} km², buffer config: out=${bufferConfig.out}km, in=${bufferConfig.inAmt}km, minArea=${bufferConfig.minArea}km²`);
+
+            // Only apply buffer if polygon is large enough for this category's buffer
+            if (preBufferArea > bufferConfig.minArea) {
+              try {
+                const bufferedOut = turf.buffer(finalFeature, bufferConfig.out, { units: 'kilometers' });
+                if (bufferedOut && bufferedOut.geometry) {
+                  const bufferedIn = turf.buffer(bufferedOut, -bufferConfig.inAmt, { units: 'kilometers' });
+                  if (bufferedIn && bufferedIn.geometry) {
+                    const postBufferArea = turf.area(bufferedIn) / 1_000_000;
+                    // Only use buffered result if it still has reasonable area (> 10 km²)
+                    if (postBufferArea > 10) {
+                      finalFeature = {
+                        type: 'Feature',
+                        geometry: bufferedIn.geometry as Polygon | MultiPolygon,
+                        properties: categoryBand.properties || {},
+                      };
+                      console.log(`[WSSI] Applied buffer rounding to ${category} (${preBufferArea.toFixed(0)} -> ${postBufferArea.toFixed(0)} km²)`);
+                    } else {
+                      console.log(`[WSSI] Skipped buffer for ${category} - would reduce to ${postBufferArea.toFixed(0)} km²`);
+                    }
+                  } else {
+                    console.log(`[WSSI] Buffer in returned null for ${category}, keeping original`);
+                  }
+                }
+              } catch (bufferErr) {
+                console.warn(`[WSSI] Buffer rounding failed for ${category}:`, bufferErr);
+                // Keep the smoothed geometry if buffer fails
+              }
+            } else {
+              console.log(`[WSSI] Skipped buffer for ${category} - area ${preBufferArea.toFixed(0)} km² < minArea ${bufferConfig.minArea} km²`);
+            }
           }
 
           // === STEP 5: Fix winding order ===
@@ -1250,8 +1256,70 @@ function processWSSIData(
   // using grid sampling and isoband generation
   // Pipeline: coarse grid → simplify → Chaikin smooth → buffer round = soft pillow shapes
   // Larger cellSize = more generalized blobby shapes (less geographic detail)
-  const cellSize = resolution === 'overview' ? 0.4 : 0.35; // degrees - coarse for blobby shapes
+  // Use FINER grid (0.15°) to capture small high-severity polygons like Major/Extreme
+  const cellSize = resolution === 'overview' ? 0.15 : 0.12; // degrees - finer grid to capture small polygons
   const smoothBands = createSmoothContours(rawBands, cellSize);
+
+  // === BYPASS FOR MAJOR/EXTREME ===
+  // If major/extreme are missing from smoothBands but exist in rawBands,
+  // use the original polygons with direct Chaikin smoothing (skip isobands)
+  for (const cat of ['major', 'extreme'] as const) {
+    if (!smoothBands[cat] && rawBands[cat]) {
+      console.log(`[WSSI] ${cat} lost in isoband processing - using direct smoothing on original polygon`);
+      const original = rawBands[cat]!;
+
+      // Apply Chaikin smoothing directly to the original polygon
+      let smoothedGeom = original.geometry as Polygon | MultiPolygon;
+
+      // Simple Chaikin smoothing function
+      const chaikinSmooth = (coords: number[][], iterations: number): number[][] => {
+        let result = [...coords];
+        for (let iter = 0; iter < iterations; iter++) {
+          const smoothed: number[][] = [];
+          for (let i = 0; i < result.length - 1; i++) {
+            const p0 = result[i];
+            const p1 = result[i + 1];
+            smoothed.push([0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]]);
+            smoothed.push([0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]);
+          }
+          if (smoothed.length > 0) smoothed.push(smoothed[0]);
+          result = smoothed;
+        }
+        return result;
+      };
+
+      if (smoothedGeom.type === 'Polygon') {
+        smoothedGeom = {
+          type: 'Polygon',
+          coordinates: smoothedGeom.coordinates.map(ring => chaikinSmooth(ring, 4))
+        };
+      } else if (smoothedGeom.type === 'MultiPolygon') {
+        smoothedGeom = {
+          type: 'MultiPolygon',
+          coordinates: smoothedGeom.coordinates.map(polygon =>
+            polygon.map(ring => chaikinSmooth(ring, 4))
+          )
+        };
+      }
+
+      // Fix winding order
+      let smoothedFeature: PolygonFeature = {
+        type: 'Feature',
+        geometry: smoothedGeom,
+        properties: original.properties || {},
+      };
+
+      try {
+        smoothedFeature = turf.rewind(smoothedFeature, { reverse: false }) as PolygonFeature;
+      } catch (e) {
+        console.warn(`[WSSI] Rewind failed for bypassed ${cat}:`, e);
+      }
+
+      smoothBands[cat] = smoothedFeature;
+      const area = turf.area(smoothedFeature) / 1_000_000;
+      console.log(`[WSSI] ${cat} recovered via direct smoothing, area: ${area.toFixed(0)} km²`);
+    }
+  }
 
   // Process each smooth band
   const processedFeatures: Feature[] = [];
@@ -1309,6 +1377,11 @@ function processWSSIData(
   processedFeatures.sort((a, b) =>
     (a.properties?.riskOrder || 0) - (b.properties?.riskOrder || 0)
   );
+
+  // Log final categories that made it to output
+  const finalCategories = processedFeatures.map(f => f.properties?.category).join(', ');
+  console.log(`[WSSI] Final output categories: ${finalCategories || 'NONE'}`);
+  console.log(`[WSSI] Final feature count: ${processedFeatures.length}, vertices: ${totalVertices}, components: ${totalComponents}`);
 
   return {
     geojson: { type: 'FeatureCollection', features: processedFeatures },
