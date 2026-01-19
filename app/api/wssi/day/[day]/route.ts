@@ -1027,7 +1027,26 @@ function createSmoothContours(
           }
 
           // === STEP 4: Buffer out then in to round corners (pillow effect) ===
-          // BUT skip for small polygons - negative buffer would eliminate them
+          // Buffer amounts scale inversely with severity:
+          // - Low severity (elevated/minor) = large buffer, very blobby shapes
+          // - High severity (major/extreme) = small buffer, more precise shapes
+          function getBufferAmounts(cat: WSSICategory): { out: number; inAmt: number; minArea: number } {
+            switch (cat) {
+              case 'elevated':
+                return { out: 15, inAmt: 12, minArea: 300 }; // Very blobby, needs 300+ km²
+              case 'minor':
+                return { out: 12, inAmt: 10, minArea: 200 }; // Blobby, needs 200+ km²
+              case 'moderate':
+                return { out: 6, inAmt: 5, minArea: 100 };   // Medium smoothing
+              case 'major':
+                return { out: 3, inAmt: 2, minArea: 50 };    // Tighter to data
+              case 'extreme':
+                return { out: 1, inAmt: 0.5, minArea: 20 };  // Most precise
+              default:
+                return { out: 8, inAmt: 6, minArea: 150 };
+            }
+          }
+
           let finalFeature: PolygonFeature = {
             type: 'Feature',
             geometry: smoothedGeom,
@@ -1036,20 +1055,19 @@ function createSmoothContours(
 
           // Check area BEFORE buffering
           const preBufferArea = turf.area(finalFeature) / 1_000_000; // km²
-          console.log(`[WSSI] ${category} pre-buffer area: ${preBufferArea.toFixed(0)} km²`);
+          const bufferConfig = getBufferAmounts(category);
+          console.log(`[WSSI] ${category} pre-buffer area: ${preBufferArea.toFixed(0)} km², buffer config: out=${bufferConfig.out}km, in=${bufferConfig.inAmt}km, minArea=${bufferConfig.minArea}km²`);
 
-          // Only apply buffer rounding if polygon is large enough (> 500 km²)
-          // Small polygons would be eliminated by the -8km buffer
-          if (preBufferArea > 500) {
+          // Only apply buffer if polygon is large enough for this category's buffer
+          if (preBufferArea > bufferConfig.minArea) {
             try {
-              // Buffer out 10km then in 8km = net +2km but rounds all corners
-              const bufferedOut = turf.buffer(finalFeature, 10, { units: 'kilometers' });
+              const bufferedOut = turf.buffer(finalFeature, bufferConfig.out, { units: 'kilometers' });
               if (bufferedOut && bufferedOut.geometry) {
-                const bufferedIn = turf.buffer(bufferedOut, -8, { units: 'kilometers' });
+                const bufferedIn = turf.buffer(bufferedOut, -bufferConfig.inAmt, { units: 'kilometers' });
                 if (bufferedIn && bufferedIn.geometry) {
                   const postBufferArea = turf.area(bufferedIn) / 1_000_000;
-                  // Only use buffered result if it still has reasonable area
-                  if (postBufferArea > 100) {
+                  // Only use buffered result if it still has reasonable area (> 10 km²)
+                  if (postBufferArea > 10) {
                     finalFeature = {
                       type: 'Feature',
                       geometry: bufferedIn.geometry as Polygon | MultiPolygon,
@@ -1068,7 +1086,7 @@ function createSmoothContours(
               // Keep the smoothed geometry if buffer fails
             }
           } else {
-            console.log(`[WSSI] Skipped buffer for ${category} - too small (${preBufferArea.toFixed(0)} km²)`);
+            console.log(`[WSSI] Skipped buffer for ${category} - area ${preBufferArea.toFixed(0)} km² < minArea ${bufferConfig.minArea} km²`);
           }
 
           // === STEP 5: Fix winding order ===
