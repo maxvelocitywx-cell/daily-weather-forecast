@@ -220,7 +220,7 @@ export default function WSSIClient() {
       popup.current
         .setLngLat(e.lngLat)
         .setHTML(`
-          <div style="padding: 12px; min-width: 180px;">
+          <div style="background: rgba(0, 0, 0, 0.9); padding: 12px 16px; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.15);">
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
               <div style="width: 12px; height: 12px; border-radius: 3px; background: ${riskColor}; flex-shrink: 0;"></div>
               <div style="font-weight: 600; font-size: 14px; color: #fff;">
@@ -278,22 +278,19 @@ export default function WSSIClient() {
       className: 'wssi-popup',
     });
 
-    // Inject CSS for popup styling (more reliable than styled-jsx)
+    // Inject CSS for popup styling - use !important to override Mapbox defaults
     if (!document.getElementById('wssi-popup-styles')) {
       const style = document.createElement('style');
       style.id = 'wssi-popup-styles';
       style.textContent = `
         .wssi-popup .mapboxgl-popup-content {
-          background: rgba(15, 15, 20, 0.95);
-          color: white;
-          padding: 0;
-          border-radius: 8px;
-          font-size: 14px;
-          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-          border: 1px solid rgba(255, 255, 255, 0.15);
+          background: transparent !important;
+          padding: 0 !important;
+          box-shadow: none !important;
+          border: none !important;
         }
         .wssi-popup .mapboxgl-popup-tip {
-          border-top-color: rgba(15, 15, 20, 0.95);
+          display: none !important;
         }
       `;
       document.head.appendChild(style);
