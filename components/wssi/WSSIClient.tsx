@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { Snowflake, RefreshCw, X, AlertTriangle } from 'lucide-react';
+import { Snowflake, RefreshCw, X, AlertTriangle, FileText, Loader2 } from 'lucide-react';
 
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 mapboxgl.accessToken = MAPBOX_TOKEN;
@@ -112,6 +112,7 @@ export default function WSSIClient() {
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<{ features: number; vertices: number; bytes: number } | null>(null);
   const [modalData, setModalData] = useState<{ riskLabel: string; riskColor: string; originalLabel: string } | null>(null);
+  const [discussionModal, setDiscussionModal] = useState<{ day: number; content: string | null; loading: boolean; error: string | null } | null>(null);
 
   // Refs for fetch control - these prevent loops
   const lastFetchKey = useRef<string | null>(null);
@@ -482,6 +483,28 @@ export default function WSSIClient() {
     setRefreshTrigger(prev => prev + 1);
   }, [selectedDay]);
 
+  // Open forecast discussion modal
+  const openForecastDiscussion = useCallback(async (day: number) => {
+    setDiscussionModal({ day, content: null, loading: true, error: null });
+
+    try {
+      const response = await fetch(`/api/wssi/discussion/${day}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      setDiscussionModal({ day, content: data.discussion, loading: false, error: null });
+    } catch (err) {
+      console.error('[WSSI] Discussion fetch error:', err);
+      setDiscussionModal({
+        day,
+        content: null,
+        loading: false,
+        error: err instanceof Error ? err.message : 'Failed to load forecast discussion',
+      });
+    }
+  }, []);
+
   // Add refreshTrigger to the fetch effect dependencies
   useEffect(() => {
     if (!mapLoaded) return;
@@ -622,6 +645,14 @@ export default function WSSIClient() {
                 </button>
               ))}
             </div>
+            {/* Forecast Discussion Button */}
+            <button
+              onClick={() => openForecastDiscussion(selectedDay)}
+              className="w-full mt-3 py-2 px-3 rounded-lg text-sm font-medium bg-white/5 text-mv-text-muted hover:bg-white/10 transition-all flex items-center justify-center gap-2"
+            >
+              <FileText size={14} />
+              Forecast Discussion
+            </button>
           </section>
 
           {/* Legend */}
@@ -769,6 +800,71 @@ export default function WSSIClient() {
             <div className="px-6 py-3 bg-white/5 border-t border-white/10">
               <button
                 onClick={() => setModalData(null)}
+                className="w-full py-2 px-4 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium text-mv-text-primary transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Forecast Discussion Modal */}
+      {discussionModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          onClick={() => setDiscussionModal(null)}
+        >
+          <div
+            className="bg-mv-bg-secondary border border-white/10 rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-white/10 bg-cyan-500/10 flex-shrink-0">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <FileText size={20} className="text-cyan-400" />
+                  <h2 className="text-lg font-semibold text-mv-text-primary">
+                    Day {discussionModal.day} Forecast Discussion
+                  </h2>
+                </div>
+                <button
+                  onClick={() => setDiscussionModal(null)}
+                  className="p-1 rounded hover:bg-white/10 transition-colors"
+                >
+                  <X size={20} className="text-mv-text-muted" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Content */}
+            <div className="px-6 py-4 overflow-y-auto flex-1">
+              {discussionModal.loading ? (
+                <div className="flex flex-col items-center justify-center py-12 gap-4">
+                  <Loader2 size={32} className="text-cyan-400 animate-spin" />
+                  <p className="text-sm text-mv-text-muted">Generating forecast discussion...</p>
+                </div>
+              ) : discussionModal.error ? (
+                <div className="text-center py-12">
+                  <p className="text-red-400 mb-4">{discussionModal.error}</p>
+                  <button
+                    onClick={() => openForecastDiscussion(discussionModal.day)}
+                    className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded-lg text-sm text-red-400 transition-colors"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : (
+                <pre className="whitespace-pre-wrap font-mono text-sm text-mv-text-secondary leading-relaxed">
+                  {discussionModal.content}
+                </pre>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3 bg-white/5 border-t border-white/10 flex-shrink-0">
+              <button
+                onClick={() => setDiscussionModal(null)}
                 className="w-full py-2 px-4 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium text-mv-text-primary transition-colors"
               >
                 Close
