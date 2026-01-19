@@ -1263,108 +1263,54 @@ function processWSSIData(
 
   console.log(`[WSSI] Dissolved bands - elevated:${rawBands.elevated ? 'yes' : 'no'}, minor:${rawBands.minor ? 'yes' : 'no'}, moderate:${rawBands.moderate ? 'yes' : 'no'}, major:${rawBands.major ? 'yes' : 'no'}, extreme:${rawBands.extreme ? 'yes' : 'no'}`);
 
-  // === CONCAVE HULL APPROACH ===
-  // Instead of isobands (creates isolated circles) or raw polygons (jagged county edges),
-  // use concave hull (alpha shape) to create smooth blob shapes around the NOAA data.
-  // This creates ONE continuous shape with naturally smooth boundaries.
+  // === SIMPLE BUFFER SMOOTHING APPROACH ===
+  // Skip isobands/grids/hulls - they all create artifacts.
+  // Just use the original dissolved NOAA polygons and smooth with buffer out/in.
+  // Buffer out smooths jagged edges, buffer in restores approximate original size.
 
-  // Helper: Chaikin smoothing for coordinates
-  const chaikinSmooth = (coords: number[][], iterations: number): number[][] => {
-    let result = [...coords];
-    for (let iter = 0; iter < iterations; iter++) {
-      const smoothed: number[][] = [];
-      for (let i = 0; i < result.length - 1; i++) {
-        const p0 = result[i];
-        const p1 = result[i + 1];
-        smoothed.push([0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]]);
-        smoothed.push([0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]);
-      }
-      if (smoothed.length > 0) smoothed.push(smoothed[0]);
-      result = smoothed;
-    }
-    return result;
-  };
-
-  // Helper: Apply Chaikin to a geometry
-  const applyChaikinToGeometry = (geom: Polygon | MultiPolygon, iterations: number): Polygon | MultiPolygon => {
-    if (geom.type === 'Polygon') {
-      return {
-        type: 'Polygon',
-        coordinates: geom.coordinates.map(ring => chaikinSmooth(ring, iterations))
-      };
-    } else {
-      return {
-        type: 'MultiPolygon',
-        coordinates: geom.coordinates.map(polygon =>
-          polygon.map(ring => chaikinSmooth(ring, iterations))
-        )
-      };
-    }
-  };
-
-  // Get maxEdge for concave hull based on category
-  // Larger maxEdge = smoother/rounder blob, smaller = tighter to original shape
-  const getMaxEdge = (cat: WSSICategory): number => {
+  // Buffer amounts per category - larger = more smoothing
+  const getBufferAmounts = (cat: WSSICategory): { out: number; inAmt: number } => {
     switch (cat) {
-      case 'elevated': return 100; // Very smooth blob
-      case 'minor': return 80;     // Smooth blob
-      case 'moderate': return 50;  // Medium smoothness
-      case 'major': return 30;     // Tighter to data
-      case 'extreme': return 20;   // Most precise
-      default: return 50;
+      case 'elevated': return { out: 20, inAmt: 18 };  // Large smoothing
+      case 'minor': return { out: 15, inAmt: 13 };     // Medium-large smoothing
+      case 'moderate': return { out: 8, inAmt: 7 };    // Medium smoothing
+      case 'major': return { out: 3, inAmt: 2 };       // Light smoothing
+      case 'extreme': return { out: 2, inAmt: 1 };     // Minimal smoothing
+      default: return { out: 10, inAmt: 8 };
     }
   };
 
-  // Create smooth blob using concave hull
-  const createSmoothBlob = (original: PolygonFeature, cat: WSSICategory): PolygonFeature | null => {
+  // Simple smoothing function - just buffer out then in
+  const smoothPolygon = (feature: PolygonFeature, cat: WSSICategory): PolygonFeature | null => {
+    const amounts = getBufferAmounts(cat);
+    console.log(`[WSSI] ${cat}: Smoothing with buffer out=${amounts.out}km, in=${amounts.inAmt}km`);
+
     try {
-      console.log(`[WSSI] ${cat}: Creating concave hull blob...`);
+      // Buffer out smooths the jagged county edges
+      let smoothed = turf.buffer(feature, amounts.out, { units: 'kilometers' });
 
-      // 1. Extract all points from the polygon
-      const points = turf.explode(original);
-      console.log(`[WSSI] ${cat}: Exploded to ${points.features.length} points`);
-
-      if (points.features.length < 4) {
-        console.log(`[WSSI] ${cat}: Not enough points for hull, using original`);
-        return original;
+      if (!smoothed || !smoothed.geometry) {
+        console.log(`[WSSI] ${cat}: Buffer out failed, using original`);
+        return feature;
       }
 
-      // 2. Create concave hull (alpha shape)
-      const maxEdge = getMaxEdge(cat);
-      let hull = turf.concave(points, { maxEdge, units: 'kilometers' });
+      // Buffer back in restores approximate original size
+      smoothed = turf.buffer(smoothed, -amounts.inAmt, { units: 'kilometers' });
 
-      // If concave fails, fall back to convex hull
-      if (!hull || !hull.geometry) {
-        console.log(`[WSSI] ${cat}: Concave hull failed, trying convex hull`);
-        hull = turf.convex(points);
-      }
-
-      if (!hull || !hull.geometry) {
-        console.log(`[WSSI] ${cat}: All hull methods failed, using original`);
-        return original;
-      }
-
-      console.log(`[WSSI] ${cat}: Hull created with maxEdge=${maxEdge}km`);
-
-      // 3. Buffer slightly to smooth any remaining rough edges
-      let smoothed = turf.buffer(hull, 5, { units: 'kilometers' });
-      if (smoothed && smoothed.geometry) {
-        smoothed = turf.buffer(smoothed, -3, { units: 'kilometers' });
+      if (!smoothed || !smoothed.geometry) {
+        console.log(`[WSSI] ${cat}: Buffer in failed, using buffered-out version`);
+        smoothed = turf.buffer(feature, amounts.out, { units: 'kilometers' });
       }
 
       if (!smoothed || !smoothed.geometry) {
-        console.log(`[WSSI] ${cat}: Buffer smoothing failed, using raw hull`);
-        smoothed = hull;
+        return feature;
       }
 
-      // 4. Apply Chaikin smoothing
-      const smoothedGeom = applyChaikinToGeometry(smoothed.geometry as Polygon | MultiPolygon, 4);
-
-      // 5. Fix winding order
+      // Fix winding order
       let result: PolygonFeature = {
         type: 'Feature',
-        geometry: smoothedGeom,
-        properties: original.properties || {},
+        geometry: smoothed.geometry as Polygon | MultiPolygon,
+        properties: feature.properties || {},
       };
 
       try {
@@ -1374,63 +1320,32 @@ function processWSSIData(
       }
 
       const area = turf.area(result) / 1_000_000;
-      console.log(`[WSSI] ${cat}: Smooth blob created, area: ${area.toFixed(0)} km²`);
+      console.log(`[WSSI] ${cat}: Smoothed, area: ${area.toFixed(0)} km²`);
 
       return result;
     } catch (e) {
-      console.warn(`[WSSI] ${cat}: Hull creation failed, using original:`, e);
-      return original;
+      console.warn(`[WSSI] ${cat}: Smoothing failed, using original:`, e);
+      return feature;
     }
   };
 
-  // Initialize smoothBands with nulls
-  const smoothBands: Record<WSSICategory, PolygonFeature | null> = {
-    elevated: null,
-    minor: null,
-    moderate: null,
-    major: null,
-    extreme: null,
-  };
-
-  // Apply concave hull approach to ALL categories
-  for (const cat of CATEGORY_ORDER) {
-    if (rawBands[cat]) {
-      smoothBands[cat] = createSmoothBlob(rawBands[cat], cat);
-    }
-  }
-
-  // Process each smooth band
+  // Process each category with simple buffer smoothing
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
   let totalComponents = 0;
 
   for (const category of CATEGORY_ORDER) {
-    const band = smoothBands[category];
-    if (!band?.geometry) continue;
+    const rawBand = rawBands[category];
+    if (!rawBand?.geometry) continue;
 
     console.log(`[WSSI] Processing ${category}...`);
 
-    // Apply light Chaikin smoothing to further refine the contours
-    let smoothedBand: PolygonFeature | null = band;
-
-    if (params.chaikinIterations > 0) {
-      const smoothedGeom = chaikinSmoothGeometry(
-        band.geometry as Polygon | MultiPolygon,
-        Math.min(params.chaikinIterations, 3) // Limit iterations since contours are already smooth
-      );
-      smoothedBand = { ...band, geometry: smoothedGeom };
-    }
-
-    // Remove small fragments
-    const fragCleaned = removeSmallFragments(smoothedBand, params.minAreaKm2);
-    if (!fragCleaned) {
-      console.warn(`[WSSI] Skipping ${category} - too small after smoothing`);
+    // Apply simple buffer smoothing
+    const smoothedBand = smoothPolygon(rawBand, category);
+    if (!smoothedBand?.geometry) {
+      console.warn(`[WSSI] Skipping ${category} - smoothing returned null`);
       continue;
     }
-    smoothedBand = fragCleaned;
-
-    // NOTE: Removed slow union/merge operation for performance
-    // The buffer expansion alone provides smoothing without expensive turf.union calls
 
     const riskInfo = WSSI_TO_RISK[category];
     const { vertices, components } = countGeometry(smoothedBand);
