@@ -973,11 +973,30 @@ function createSmoothContours(
 
           console.log(`[WSSI] Applied Chaikin smoothing to ${category} contour`);
 
-          smoothBands[category] = {
+          // Fix winding order after smoothing - ensures polygons render as fills, not holes
+          let finalFeature: PolygonFeature = {
             type: 'Feature',
             geometry: smoothedGeom,
             properties: categoryBand.properties || {},
           };
+
+          try {
+            // turf.rewind ensures correct winding order (outer rings CCW, holes CW for GeoJSON)
+            finalFeature = turf.rewind(finalFeature, { reverse: false }) as PolygonFeature;
+            console.log(`[WSSI] Fixed winding order for ${category}`);
+          } catch (rewindErr) {
+            console.warn(`[WSSI] Rewind failed for ${category}:`, rewindErr);
+          }
+
+          // Debug: check for zero-area polygons
+          const area = turf.area(finalFeature);
+          if (area === 0) {
+            console.warn(`[WSSI] WARNING: Zero area polygon for ${category}!`);
+          } else {
+            console.log(`[WSSI] ${category} area: ${(area / 1_000_000).toFixed(0)} km²`);
+          }
+
+          smoothBands[category] = finalFeature;
           console.log(`[WSSI] Created isoband for ${category}`);
         }
       }
