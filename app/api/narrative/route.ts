@@ -37,21 +37,63 @@ export async function GET(request: Request) {
 
     const client = new OpenAI({ apiKey });
 
+    // Build detailed weather context for each region
+    const regionDetails = forecast.regions.map((r: any) => {
+      const details: string[] = [];
+      details.push(`${r.region.name}:`);
+      details.push(`  Risk: ${r.risk.level} (${r.risk.overall}/10)`);
+
+      // Temperature details
+      if (r.summary?.tempRange) {
+        details.push(`  Temps: Highs ${Math.round(r.summary.tempRange.max)}°F, Lows ${Math.round(r.summary.tempRange.min)}°F`);
+      }
+
+      // Precipitation details
+      if (r.summary?.totalSnow > 0.5) {
+        details.push(`  Snow: ${r.summary.totalSnow.toFixed(1)}" expected`);
+      }
+      if (r.summary?.totalPrecip > 0.25) {
+        details.push(`  Rain: ${r.summary.totalPrecip.toFixed(2)}" expected`);
+      }
+
+      // Wind details
+      if (r.summary?.maxWindGust >= 25) {
+        details.push(`  Wind: Gusts up to ${r.summary.maxWindGust} mph`);
+      }
+
+      // Top cities if available
+      if (r.cities && r.cities.length > 0) {
+        const topCities = r.cities.slice(0, 3).map((c: any) => {
+          let cityInfo = `${c.name} (${Math.round(c.tmax || c.high || 50)}°F`;
+          if (c.snow > 0) cityInfo += `, ${c.snow}" snow`;
+          else if (c.rain > 0.1) cityInfo += `, ${c.rain}" rain`;
+          cityInfo += ')';
+          return cityInfo;
+        }).join(', ');
+        details.push(`  Cities: ${topCities}`);
+      }
+
+      return details.join('\n');
+    }).join('\n\n');
+
     // Generate national narrative
-    const nationalPrompt = `You are a professional meteorologist writing a weather synopsis for the United States.
+    const nationalPrompt = `You are a professional meteorologist writing a detailed weather synopsis for the United States.
 
-Current conditions:
-- National risk level: ${forecast.national.level} (${forecast.national.overallRisk}/10)
-- Active regions: ${forecast.national.activeRegions.join(', ') || 'None'}
+CURRENT WEATHER DATA BY REGION:
+${regionDetails}
 
-Regional overview:
-${forecast.regions.map((r: any) => `- ${r.region.name}: ${r.risk.level} (${r.risk.overall}/10) - ${r.risk.headline}`).join('\n')}
+National Summary:
+- Overall Risk Level: ${forecast.national.level} (${forecast.national.overallRisk}/10)
+- Active Regions: ${forecast.national.activeRegions.join(', ') || 'None with elevated risk'}
 
-Write a concise 2-paragraph national weather outlook:
-1. First paragraph: Main weather story and significant hazards
-2. Second paragraph: Regional variations and outlook
+INSTRUCTIONS:
+Write a detailed 2-paragraph national weather outlook based on the ACTUAL DATA above:
 
-Keep it professional, factual, and avoid sensationalism. No emojis.`;
+Paragraph 1: Lead with the most significant weather story. Mention specific cities, temperatures, precipitation amounts (snow/rain totals), and wind speeds from the data. Focus on areas with active weather first.
+
+Paragraph 2: Cover the quieter regions with their temperature ranges and conditions. Mention specific cities and their expected highs/lows.
+
+IMPORTANT: Use the specific numbers and city names from the data above. Do not invent conditions - only reference what's in the data. Be professional and factual. No emojis.`;
 
     const nationalResponse = await client.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -76,16 +118,31 @@ Keep it professional, factual, and avoid sensationalism. No emojis.`;
 
     // Generate regional narratives (in parallel)
     const regionalPromises = forecast.regions.map(async (region: any) => {
-      const regionPrompt = `Write a 1-sentence headline and 2-sentence summary for ${region.region.name}:
-- Risk: ${region.risk.level} (${region.risk.overall}/10)
-- Snow: ${region.summary.totalSnow.toFixed(1)}" total
-- Rain: ${region.summary.totalPrecip.toFixed(2)}" total
-- Wind: ${region.summary.maxWindGust} mph max gusts
-- Temps: ${Math.round(region.summary.tempRange.min)}°F to ${Math.round(region.summary.tempRange.max)}°F
+      // Build city details for this region
+      let cityDetails = '';
+      if (region.cities && region.cities.length > 0) {
+        cityDetails = region.cities.slice(0, 5).map((c: any) => {
+          let info = `${c.name}: ${Math.round(c.tmax || c.high || 50)}°F high, ${Math.round(c.tmin || c.low || 30)}°F low`;
+          if (c.snow > 0) info += `, ${c.snow}" snow`;
+          else if (c.rain > 0.1) info += `, ${c.rain}" rain`;
+          if (c.windGust >= 30) info += `, ${c.windGust} mph gusts`;
+          return info;
+        }).join('\n');
+      }
 
-Format:
-HEADLINE: [one short headline]
-SUMMARY: [2 sentences about conditions and impacts]`;
+      const regionPrompt = `Write a weather summary for ${region.region.name}:
+
+WEATHER DATA:
+- Risk Level: ${region.risk.level} (${region.risk.overall}/10)
+- Temperature Range: Lows ${Math.round(region.summary.tempRange.min)}°F to Highs ${Math.round(region.summary.tempRange.max)}°F
+- Snow Total: ${region.summary.totalSnow.toFixed(1)}"
+- Rain Total: ${region.summary.totalPrecip.toFixed(2)}"
+- Max Wind Gusts: ${region.summary.maxWindGust} mph
+${cityDetails ? `\nCITY DETAILS:\n${cityDetails}` : ''}
+
+Format your response EXACTLY as:
+HEADLINE: [One short, specific headline mentioning key weather feature and a city if applicable]
+SUMMARY: [2-3 sentences describing conditions with specific temperatures, precipitation amounts, and city names from the data above. Be specific, not generic.]`;
 
       try {
         const response = await client.chat.completions.create({
