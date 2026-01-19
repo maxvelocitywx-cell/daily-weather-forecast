@@ -1263,59 +1263,126 @@ function processWSSIData(
 
   console.log(`[WSSI] Dissolved bands - elevated:${rawBands.elevated ? 'yes' : 'no'}, minor:${rawBands.minor ? 'yes' : 'no'}, moderate:${rawBands.moderate ? 'yes' : 'no'}, major:${rawBands.major ? 'yes' : 'no'}, extreme:${rawBands.extreme ? 'yes' : 'no'}`);
 
-  // === SMOOTH CONTOURING APPROACH ===
-  // Convert angular county-based polygons into smooth organic blobs
-  // using grid sampling and isoband generation
-  // Pipeline: coarse grid → simplify → Chaikin smooth → buffer round = soft pillow shapes
-  // Larger cellSize = more generalized blobby shapes (less geographic detail)
-  // Use coarser grid for performance (avoid 504 timeouts)
-  // 0.2° grid still captures Major/Extreme polygons while being much faster
-  const cellSize = resolution === 'overview' ? 0.2 : 0.15; // degrees - coarser for performance
-  const smoothBands = createSmoothContours(rawBands, cellSize);
+  // === DIFFERENT APPROACHES FOR DIFFERENT SEVERITY LEVELS ===
+  // - Elevated/Minor: Skip isobands, use original NOAA polygons with buffer smoothing
+  //   (isobands create isolated circles/artifacts for these large areas)
+  // - Moderate/Major/Extreme: Use isobands for more precise contours, or fallback to originals
 
-  // === BYPASS FOR MAJOR/EXTREME ===
-  // If major/extreme are missing from smoothBands but exist in rawBands,
-  // use the original polygons with direct Chaikin smoothing (skip isobands)
-  for (const cat of ['major', 'extreme'] as const) {
-    if (!smoothBands[cat] && rawBands[cat]) {
-      console.log(`[WSSI] ${cat} lost in isoband processing - using direct smoothing on original polygon`);
+  // Helper: Chaikin smoothing for coordinates
+  const chaikinSmooth = (coords: number[][], iterations: number): number[][] => {
+    let result = [...coords];
+    for (let iter = 0; iter < iterations; iter++) {
+      const smoothed: number[][] = [];
+      for (let i = 0; i < result.length - 1; i++) {
+        const p0 = result[i];
+        const p1 = result[i + 1];
+        smoothed.push([0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]]);
+        smoothed.push([0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]);
+      }
+      if (smoothed.length > 0) smoothed.push(smoothed[0]);
+      result = smoothed;
+    }
+    return result;
+  };
+
+  // Helper: Apply Chaikin to a geometry
+  const applyChaikinToGeometry = (geom: Polygon | MultiPolygon, iterations: number): Polygon | MultiPolygon => {
+    if (geom.type === 'Polygon') {
+      return {
+        type: 'Polygon',
+        coordinates: geom.coordinates.map(ring => chaikinSmooth(ring, iterations))
+      };
+    } else {
+      return {
+        type: 'MultiPolygon',
+        coordinates: geom.coordinates.map(polygon =>
+          polygon.map(ring => chaikinSmooth(ring, iterations))
+        )
+      };
+    }
+  };
+
+  // Initialize smoothBands with nulls
+  const smoothBands: Record<WSSICategory, PolygonFeature | null> = {
+    elevated: null,
+    minor: null,
+    moderate: null,
+    major: null,
+    extreme: null,
+  };
+
+  // === ELEVATED/MINOR: Use original NOAA polygons with buffer smoothing ===
+  // Skip isobands entirely - they create isolated circles/artifacts
+  for (const cat of ['elevated', 'minor'] as const) {
+    if (rawBands[cat]) {
+      console.log(`[WSSI] ${cat}: Using original NOAA polygon with buffer smoothing (skipping isobands)`);
       const original = rawBands[cat]!;
 
-      // Apply Chaikin smoothing directly to the original polygon
-      let smoothedGeom = original.geometry as Polygon | MultiPolygon;
-
-      // Simple Chaikin smoothing function
-      const chaikinSmooth = (coords: number[][], iterations: number): number[][] => {
-        let result = [...coords];
-        for (let iter = 0; iter < iterations; iter++) {
-          const smoothed: number[][] = [];
-          for (let i = 0; i < result.length - 1; i++) {
-            const p0 = result[i];
-            const p1 = result[i + 1];
-            smoothed.push([0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]]);
-            smoothed.push([0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]);
-          }
-          if (smoothed.length > 0) smoothed.push(smoothed[0]);
-          result = smoothed;
+      try {
+        // Buffer out then in to smooth jagged county edges
+        let smoothed = turf.buffer(original, 8, { units: 'kilometers' });
+        if (smoothed && smoothed.geometry) {
+          smoothed = turf.buffer(smoothed, -5, { units: 'kilometers' });
         }
-        return result;
-      };
 
-      if (smoothedGeom.type === 'Polygon') {
-        smoothedGeom = {
-          type: 'Polygon',
-          coordinates: smoothedGeom.coordinates.map(ring => chaikinSmooth(ring, 4))
-        };
-      } else if (smoothedGeom.type === 'MultiPolygon') {
-        smoothedGeom = {
-          type: 'MultiPolygon',
-          coordinates: smoothedGeom.coordinates.map(polygon =>
-            polygon.map(ring => chaikinSmooth(ring, 4))
-          )
-        };
+        if (smoothed && smoothed.geometry) {
+          // Apply Chaikin smoothing
+          const smoothedGeom = applyChaikinToGeometry(smoothed.geometry as Polygon | MultiPolygon, 4);
+
+          // Fix winding order
+          let smoothedFeature: PolygonFeature = {
+            type: 'Feature',
+            geometry: smoothedGeom,
+            properties: original.properties || {},
+          };
+
+          try {
+            smoothedFeature = turf.rewind(smoothedFeature, { reverse: false }) as PolygonFeature;
+          } catch (e) {
+            console.warn(`[WSSI] Rewind failed for ${cat}:`, e);
+          }
+
+          const area = turf.area(smoothedFeature) / 1_000_000;
+          console.log(`[WSSI] ${cat} smoothed with buffer, area: ${area.toFixed(0)} km²`);
+          smoothBands[cat] = smoothedFeature;
+        } else {
+          // Fallback: just use original with Chaikin
+          console.log(`[WSSI] ${cat}: Buffer failed, using original with Chaikin only`);
+          const smoothedGeom = applyChaikinToGeometry(original.geometry as Polygon | MultiPolygon, 4);
+          smoothBands[cat] = {
+            type: 'Feature',
+            geometry: smoothedGeom,
+            properties: original.properties || {},
+          };
+        }
+      } catch (e) {
+        console.warn(`[WSSI] ${cat} smoothing failed, using original:`, e);
+        smoothBands[cat] = original;
       }
+    }
+  }
 
-      // Fix winding order
+  // === MODERATE/MAJOR/EXTREME: Use isobands for precise contours ===
+  // Only run isobands for these categories (smaller, need precision)
+  const cellSize = resolution === 'overview' ? 0.2 : 0.15;
+  const isobandCategories: Record<WSSICategory, PolygonFeature | null> = {
+    elevated: null, // Already handled above
+    minor: null,    // Already handled above
+    moderate: rawBands.moderate,
+    major: rawBands.major,
+    extreme: rawBands.extreme,
+  };
+  const isobandResults = createSmoothContours(isobandCategories, cellSize);
+
+  // Copy isoband results for moderate/major/extreme
+  for (const cat of ['moderate', 'major', 'extreme'] as const) {
+    if (isobandResults[cat]) {
+      smoothBands[cat] = isobandResults[cat];
+    } else if (rawBands[cat]) {
+      // Fallback: use original with Chaikin if isobands failed
+      console.log(`[WSSI] ${cat} lost in isobands, using original with Chaikin`);
+      const original = rawBands[cat]!;
+      const smoothedGeom = applyChaikinToGeometry(original.geometry as Polygon | MultiPolygon, 4);
       let smoothedFeature: PolygonFeature = {
         type: 'Feature',
         geometry: smoothedGeom,
@@ -1325,7 +1392,7 @@ function processWSSIData(
       try {
         smoothedFeature = turf.rewind(smoothedFeature, { reverse: false }) as PolygonFeature;
       } catch (e) {
-        console.warn(`[WSSI] Rewind failed for bypassed ${cat}:`, e);
+        console.warn(`[WSSI] Rewind failed for ${cat}:`, e);
       }
 
       smoothBands[cat] = smoothedFeature;
