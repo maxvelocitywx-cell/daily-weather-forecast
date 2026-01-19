@@ -1263,92 +1263,26 @@ function processWSSIData(
 
   console.log(`[WSSI] Dissolved bands - elevated:${rawBands.elevated ? 'yes' : 'no'}, minor:${rawBands.minor ? 'yes' : 'no'}, moderate:${rawBands.moderate ? 'yes' : 'no'}, major:${rawBands.major ? 'yes' : 'no'}, extreme:${rawBands.extreme ? 'yes' : 'no'}`);
 
-  // === SIMPLE BUFFER SMOOTHING APPROACH ===
-  // Skip isobands/grids/hulls - they all create artifacts.
-  // Just use the original dissolved NOAA polygons and smooth with buffer out/in.
-  // Buffer out smooths jagged edges, buffer in restores approximate original size.
+  // === ISOBAND SMOOTH CONTOURING APPROACH ===
+  // Use point grid + isobands to create smooth blob-like contours
+  // This converts jagged county boundaries into smooth circular shapes
+  // Grid cellSize: 0.08° (~8km) - fine enough for smooth curves, fast enough to avoid timeout
+  const cellSize = resolution === 'overview' ? 0.08 : 0.06;
+  const smoothBands = createSmoothContours(rawBands, cellSize);
 
-  // Buffer amounts per category - larger = more smoothing
-  const getBufferAmounts = (cat: WSSICategory): { out: number; inAmt: number } => {
-    switch (cat) {
-      case 'elevated': return { out: 20, inAmt: 18 };  // Large smoothing
-      case 'minor': return { out: 15, inAmt: 13 };     // Medium-large smoothing
-      case 'moderate': return { out: 8, inAmt: 7 };    // Medium smoothing
-      case 'major': return { out: 3, inAmt: 2 };       // Light smoothing
-      case 'extreme': return { out: 2, inAmt: 1 };     // Minimal smoothing
-      default: return { out: 10, inAmt: 8 };
-    }
-  };
-
-  // Simple smoothing function - just buffer out then in
-  const smoothPolygon = (feature: PolygonFeature, cat: WSSICategory): PolygonFeature | null => {
-    const amounts = getBufferAmounts(cat);
-    console.log(`[WSSI] ${cat}: Smoothing with buffer out=${amounts.out}km, in=${amounts.inAmt}km`);
-
-    try {
-      // Buffer out smooths the jagged county edges
-      let smoothed = turf.buffer(feature, amounts.out, { units: 'kilometers' });
-
-      if (!smoothed || !smoothed.geometry) {
-        console.log(`[WSSI] ${cat}: Buffer out failed, using original`);
-        return feature;
-      }
-
-      // Buffer back in restores approximate original size
-      smoothed = turf.buffer(smoothed, -amounts.inAmt, { units: 'kilometers' });
-
-      if (!smoothed || !smoothed.geometry) {
-        console.log(`[WSSI] ${cat}: Buffer in failed, using buffered-out version`);
-        smoothed = turf.buffer(feature, amounts.out, { units: 'kilometers' });
-      }
-
-      if (!smoothed || !smoothed.geometry) {
-        return feature;
-      }
-
-      // Fix winding order
-      let result: PolygonFeature = {
-        type: 'Feature',
-        geometry: smoothed.geometry as Polygon | MultiPolygon,
-        properties: feature.properties || {},
-      };
-
-      try {
-        result = turf.rewind(result, { reverse: false }) as PolygonFeature;
-      } catch (e) {
-        console.warn(`[WSSI] Rewind failed for ${cat}:`, e);
-      }
-
-      const area = turf.area(result) / 1_000_000;
-      console.log(`[WSSI] ${cat}: Smoothed, area: ${area.toFixed(0)} km²`);
-
-      return result;
-    } catch (e) {
-      console.warn(`[WSSI] ${cat}: Smoothing failed, using original:`, e);
-      return feature;
-    }
-  };
-
-  // Process each category with simple buffer smoothing
+  // Process each smooth band
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
   let totalComponents = 0;
 
   for (const category of CATEGORY_ORDER) {
-    const rawBand = rawBands[category];
-    if (!rawBand?.geometry) continue;
+    const band = smoothBands[category];
+    if (!band?.geometry) continue;
 
     console.log(`[WSSI] Processing ${category}...`);
 
-    // Apply simple buffer smoothing
-    const smoothedBand = smoothPolygon(rawBand, category);
-    if (!smoothedBand?.geometry) {
-      console.warn(`[WSSI] Skipping ${category} - smoothing returned null`);
-      continue;
-    }
-
     const riskInfo = WSSI_TO_RISK[category];
-    const { vertices, components } = countGeometry(smoothedBand);
+    const { vertices, components } = countGeometry(band);
     totalVertices += vertices;
     totalComponents += components;
 
@@ -1356,7 +1290,7 @@ function processWSSIData(
 
     processedFeatures.push({
       type: 'Feature',
-      geometry: smoothedBand.geometry,
+      geometry: band.geometry,
       properties: {
         day,
         category,
