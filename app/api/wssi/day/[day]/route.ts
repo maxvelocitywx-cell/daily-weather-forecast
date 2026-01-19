@@ -1036,8 +1036,9 @@ function processWSSIData(
   // === SMOOTH CONTOURING APPROACH ===
   // Convert angular county-based polygons into smooth organic blobs
   // using grid sampling and isoband generation
-  // Fine grid (0.05°) + Chaikin smoothing on contours = smooth blobs
-  const cellSize = resolution === 'overview' ? 0.08 : 0.05; // degrees - finer = smoother
+  // Grid + Chaikin smoothing on contours = smooth blobs
+  // Note: 0.05° was too fine (504 timeout), 0.15° works within time limits
+  const cellSize = resolution === 'overview' ? 0.2 : 0.15; // degrees - balance smoothness vs speed
   const smoothBands = createSmoothContours(rawBands, cellSize);
 
   // Process each smooth band
