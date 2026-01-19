@@ -63,29 +63,23 @@ const WSSI_TO_RISK: Record<WSSICategory, { label: string; originalLabel: string;
 };
 
 // Smoothing parameters - ALL VALUES IN METERS
-// Pipeline: pre-simplify -> buffer out/in -> Chaikin smoothing -> light post-simplify
+// Pipeline: pre-simplify -> Chaikin smoothing ONLY (no buffer, no post-simplify)
 // Goal: FULLY ROUNDED boundaries with NO corners or straight edges
 const SMOOTH_PARAMS = {
   overview: {
-    // Pre-simplify: aggressive to remove grid stair-steps
-    preSimplifyMeters: 5000,        // 5km - removes grid artifacts
-    // Buffer pass: symmetric rounding for smooth curves
-    bufferOutMeters: 20000,         // 20km out - creates rounded corners
-    bufferInMeters: 20000,          // 20km in - symmetric = pure rounding
-    bufferSteps: 64,                // High step count for smooth arcs
+    // Pre-simplify: remove grid stair-steps before smoothing
+    preSimplifyMeters: 3000,        // 3km - removes grid artifacts
     // Chaikin smoothing iterations (each iteration cuts corners)
-    chaikinIterations: 4,           // 4 iterations = very smooth curves
-    // Post-simplify: light to reduce vertex count while preserving curves
-    postSimplifyMeters: 300,        // 300m - light simplification
+    // More iterations = smoother curves, but more vertices
+    chaikinIterations: 5,           // 5 iterations = very smooth curves
+    // NO post-simplify - it destroys the smooth curves
+    postSimplifyMeters: 0,          // DISABLED
     minAreaKm2: 400,                // Min area filter
   },
   detail: {
-    preSimplifyMeters: 5000,
-    bufferOutMeters: 20000,
-    bufferInMeters: 20000,
-    bufferSteps: 64,
-    chaikinIterations: 4,
-    postSimplifyMeters: 300,
+    preSimplifyMeters: 3000,
+    chaikinIterations: 5,
+    postSimplifyMeters: 0,          // DISABLED
     minAreaKm2: 400,
   },
 };
@@ -407,8 +401,9 @@ function chaikinSmoothGeometry(geom: Polygon | MultiPolygon, iterations: number)
 }
 
 /**
- * Apply smoothing using buffer + Chaikin's corner-cutting algorithm
- * Pipeline: pre-simplify -> buffer out/in -> Chaikin smoothing -> post-simplify
+ * Apply smoothing using Chaikin's corner-cutting algorithm ONLY
+ * Pipeline: pre-simplify -> Chaikin smoothing (no buffer, no post-simplify)
+ * This keeps polygons valid and produces genuinely smooth curves
  */
 function smoothGeometryWithTurf(
   feature: PolygonFeature,
@@ -419,12 +414,12 @@ function smoothGeometryWithTurf(
     const startVertices = countGeometry(feature).vertices;
     console.log(`[WSSI] smoothGeometryWithTurf START: ${startVertices} vertices`);
 
-    // Step 1: PRE-SIMPLIFY (remove grid stair-steps)
+    // Step 1: PRE-SIMPLIFY (remove grid stair-steps before smoothing)
     const preSimplifyDegrees = params.preSimplifyMeters / 111000;
     try {
       const simplified = turf.simplify(result, {
         tolerance: preSimplifyDegrees,
-        highQuality: false,
+        highQuality: true,  // Use high quality for better corner preservation
         mutate: false,
       });
       if (simplified?.geometry) {
@@ -435,37 +430,8 @@ function smoothGeometryWithTurf(
     }
     console.log(`[WSSI] After pre-simplify: ${countGeometry(result).vertices} vertices`);
 
-    // Step 2: BUFFER OUT (expand) - use kilometers for turf
-    const bufferOutKm = params.bufferOutMeters / 1000;
-    try {
-      const bufferedOut = turf.buffer(result, bufferOutKm, {
-        units: 'kilometers',
-        steps: params.bufferSteps,
-      });
-      if (bufferedOut?.geometry) {
-        result = bufferedOut as PolygonFeature;
-        console.log(`[WSSI] After buffer OUT (${bufferOutKm}km): ${countGeometry(result).vertices} vertices`);
-      }
-    } catch (e) {
-      console.warn('[WSSI] Buffer OUT failed:', e);
-    }
-
-    // Step 3: BUFFER IN (contract back) - symmetric for pure rounding
-    const bufferInKm = params.bufferInMeters / 1000;
-    try {
-      const bufferedIn = turf.buffer(result, -bufferInKm, {
-        units: 'kilometers',
-        steps: params.bufferSteps,
-      });
-      if (bufferedIn?.geometry) {
-        result = bufferedIn as PolygonFeature;
-        console.log(`[WSSI] After buffer IN (${bufferInKm}km): ${countGeometry(result).vertices} vertices`);
-      }
-    } catch (e) {
-      console.warn('[WSSI] Buffer IN failed:', e);
-    }
-
-    // Step 4: CHAIKIN SMOOTHING - iteratively cut corners for smooth curves
+    // Step 2: CHAIKIN SMOOTHING - iteratively cut corners for smooth curves
+    // This is the ONLY smoothing step - no buffers that can create artifacts
     if (params.chaikinIterations > 0) {
       const smoothedGeom = chaikinSmoothGeometry(
         result.geometry as Polygon | MultiPolygon,
@@ -475,23 +441,7 @@ function smoothGeometryWithTurf(
       console.log(`[WSSI] After Chaikin (${params.chaikinIterations} iterations): ${countGeometry(result).vertices} vertices`);
     }
 
-    // Step 5: POST-SIMPLIFY - light simplification to reduce vertex count
-    if (params.postSimplifyMeters > 0) {
-      const postSimplifyDegrees = params.postSimplifyMeters / 111000;
-      try {
-        const postSimplified = turf.simplify(result, {
-          tolerance: postSimplifyDegrees,
-          highQuality: true,
-          mutate: false,
-        });
-        if (postSimplified?.geometry) {
-          result = postSimplified as PolygonFeature;
-        }
-      } catch (e) {
-        console.warn('[WSSI] Post-simplify failed:', e);
-      }
-      console.log(`[WSSI] After post-simplify: ${countGeometry(result).vertices} vertices`);
-    }
+    // NO POST-SIMPLIFY - it would destroy the smooth curves we just created
 
     console.log(`[WSSI] smoothGeometryWithTurf COMPLETE: ${startVertices} -> ${countGeometry(result).vertices} vertices`);
     return result;
