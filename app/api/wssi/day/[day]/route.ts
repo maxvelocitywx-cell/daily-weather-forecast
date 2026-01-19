@@ -802,7 +802,130 @@ function sanitizeGeometry(feature: PolygonFeature, resolution: 'overview' | 'det
 }
 
 /**
- * Process raw WSSI data into dissolved, simplified exclusive bands
+ * Create smooth contours from polygon data using grid interpolation
+ * This converts angular county-based polygons into smooth organic blobs
+ */
+function createSmoothContours(
+  bands: Record<WSSICategory, PolygonFeature | null>,
+  cellSize: number = 0.15 // degrees - smaller = smoother but slower
+): Record<WSSICategory, PolygonFeature | null> {
+  console.log(`[WSSI] Creating smooth contours with cellSize=${cellSize}°`);
+
+  // Calculate bounding box of all features
+  const allFeatures: PolygonFeature[] = [];
+  for (const category of CATEGORY_ORDER) {
+    if (bands[category]) allFeatures.push(bands[category]!);
+  }
+
+  if (allFeatures.length === 0) {
+    return { elevated: null, minor: null, moderate: null, major: null, extreme: null };
+  }
+
+  // Get combined bbox with padding
+  const fc = turf.featureCollection(allFeatures);
+  const bbox = turf.bbox(fc);
+  const padding = 0.5; // degrees
+  const paddedBbox: [number, number, number, number] = [
+    bbox[0] - padding,
+    bbox[1] - padding,
+    bbox[2] + padding,
+    bbox[3] + padding,
+  ];
+
+  console.log(`[WSSI] Grid bbox: [${paddedBbox.map(v => v.toFixed(2)).join(', ')}]`);
+
+  // Create a grid of points
+  const gridStart = Date.now();
+  const grid = turf.pointGrid(paddedBbox, cellSize, { units: 'degrees' });
+  console.log(`[WSSI] Created grid with ${grid.features.length} points in ${Date.now() - gridStart}ms`);
+
+  // Category values: elevated=1, minor=2, moderate=3, major=4, extreme=5
+  const categoryValue: Record<WSSICategory, number> = {
+    elevated: 1,
+    minor: 2,
+    moderate: 3,
+    major: 4,
+    extreme: 5,
+  };
+
+  // For each point, determine the highest WSSI category it falls in
+  const sampleStart = Date.now();
+  for (const point of grid.features) {
+    let maxValue = 0;
+
+    // Check each category from highest to lowest
+    for (const category of [...CATEGORY_ORDER].reverse()) {
+      const band = bands[category];
+      if (!band) continue;
+
+      try {
+        if (turf.booleanPointInPolygon(point, band)) {
+          maxValue = Math.max(maxValue, categoryValue[category]);
+          break; // Found highest, no need to check lower categories
+        }
+      } catch {
+        // Skip invalid geometries
+      }
+    }
+
+    point.properties = { ...point.properties, value: maxValue };
+  }
+  console.log(`[WSSI] Sampled grid in ${Date.now() - sampleStart}ms`);
+
+  // Generate isobands for each category threshold
+  const contourStart = Date.now();
+  const smoothBands: Record<WSSICategory, PolygonFeature | null> = {
+    elevated: null,
+    minor: null,
+    moderate: null,
+    major: null,
+    extreme: null,
+  };
+
+  // Create isobands: value >= threshold means inside that category
+  // elevated: value >= 1, minor: value >= 2, etc.
+  const thresholds: [WSSICategory, number, number][] = [
+    ['elevated', 0.5, 1.5],   // catches value 1
+    ['minor', 1.5, 2.5],      // catches value 2
+    ['moderate', 2.5, 3.5],   // catches value 3
+    ['major', 3.5, 4.5],      // catches value 4
+    ['extreme', 4.5, 5.5],    // catches value 5
+  ];
+
+  for (const [category, minVal, maxVal] of thresholds) {
+    try {
+      // Use isobands to create filled regions
+      const isobands = turf.isobands(grid, [minVal, maxVal], { zProperty: 'value' });
+
+      if (isobands.features.length > 0) {
+        // Find the band that represents this category (value between minVal and maxVal)
+        const categoryBand = isobands.features.find(f => {
+          const props = f.properties as { value?: string } | undefined;
+          return props?.value === `${minVal}-${maxVal}`;
+        });
+
+        if (categoryBand && categoryBand.geometry) {
+          // isobands returns MultiPolygon geometries
+          smoothBands[category] = {
+            type: 'Feature',
+            geometry: categoryBand.geometry as Polygon | MultiPolygon,
+            properties: categoryBand.properties || {},
+          };
+          console.log(`[WSSI] Created isoband for ${category}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[WSSI] Failed to create isoband for ${category}:`, err);
+    }
+  }
+
+  console.log(`[WSSI] Generated contours in ${Date.now() - contourStart}ms`);
+
+  return smoothBands;
+}
+
+/**
+ * Process raw WSSI data into smooth contoured bands
  */
 function processWSSIData(
   rawFeatures: Feature[],
@@ -833,9 +956,7 @@ function processWSSIData(
   }
 
   // Union features within each category (dissolve)
-  // NO SUBTRACTION - keep full extents so bands overlap naturally
-  // Higher severity bands render on top of lower severity bands
-  const bands: Record<WSSICategory, PolygonFeature | null> = {
+  const rawBands: Record<WSSICategory, PolygonFeature | null> = {
     elevated: safeUnion(featuresByCategory.elevated),
     minor: safeUnion(featuresByCategory.minor),
     moderate: safeUnion(featuresByCategory.moderate),
@@ -843,34 +964,35 @@ function processWSSIData(
     extreme: safeUnion(featuresByCategory.extreme),
   };
 
-  console.log(`[WSSI] Dissolved bands - elevated:${bands.elevated ? 'yes' : 'no'}, minor:${bands.minor ? 'yes' : 'no'}, moderate:${bands.moderate ? 'yes' : 'no'}, major:${bands.major ? 'yes' : 'no'}, extreme:${bands.extreme ? 'yes' : 'no'}`);
+  console.log(`[WSSI] Dissolved bands - elevated:${rawBands.elevated ? 'yes' : 'no'}, minor:${rawBands.minor ? 'yes' : 'no'}, moderate:${rawBands.moderate ? 'yes' : 'no'}, major:${rawBands.major ? 'yes' : 'no'}, extreme:${rawBands.extreme ? 'yes' : 'no'}`);
 
-  // Process each band with full geometry sanitization pipeline
+  // === SMOOTH CONTOURING APPROACH ===
+  // Convert angular county-based polygons into smooth organic blobs
+  // using grid sampling and isoband generation
+  const cellSize = resolution === 'overview' ? 0.2 : 0.15; // degrees
+  const smoothBands = createSmoothContours(rawBands, cellSize);
+
+  // Process each smooth band
   const processedFeatures: Feature[] = [];
   let totalVertices = 0;
   let totalComponents = 0;
 
   for (const category of CATEGORY_ORDER) {
-    const band = bands[category];
+    const band = smoothBands[category];
     if (!band?.geometry) continue;
 
     console.log(`[WSSI] Processing ${category}...`);
 
-    // === TEMPORARILY DISABLED: Return RAW unprocessed data ===
-    // Skip ALL processing to see original NOAA polygons
+    // Apply light Chaikin smoothing to further refine the contours
+    let smoothedBand: PolygonFeature | null = band;
 
-    /*
-    // === SMOOTHING PIPELINE USING TURF.JS (WGS84) ===
-    // This is more robust than JSTS with EPSG:3857
-
-    // Apply smoothing with buffer operations
-    const smoothedBandResult = smoothGeometryWithTurf(band, params);
-    if (!smoothedBandResult) {
-      console.warn(`[WSSI] Skipping ${category} - smoothing returned null`);
-      continue;
+    if (params.chaikinIterations > 0) {
+      const smoothedGeom = chaikinSmoothGeometry(
+        band.geometry as Polygon | MultiPolygon,
+        Math.min(params.chaikinIterations, 3) // Limit iterations since contours are already smooth
+      );
+      smoothedBand = { ...band, geometry: smoothedGeom };
     }
-
-    let smoothedBand = smoothedBandResult;
 
     // Remove small fragments
     const fragCleaned = removeSmallFragments(smoothedBand, params.minAreaKm2);
@@ -880,39 +1002,16 @@ function processWSSIData(
     }
     smoothedBand = fragCleaned;
 
-    // Step 5: Final geometry sanitization (for Mapbox compatibility)
-    const sanitized = sanitizeGeometry(smoothedBand, resolution);
-    if (!sanitized) {
-      console.warn(`[WSSI] Skipping ${category} - sanitization returned null`);
-      continue;
-    }
-    smoothedBand = sanitized;
-
-    // Step 6: Final area check
-    try {
-      const finalArea = turf.area(smoothedBand);
-      if (finalArea < params.minAreaKm2 * 1_000_000) {
-        console.warn(`[WSSI] Skipping ${category} - area too small: ${(finalArea / 1_000_000).toFixed(0)} km²`);
-        continue;
-      }
-    } catch {
-      continue;
-    }
-    */
-
-    // Use RAW band directly - no smoothing, no sanitization
-    const rawBand = band;
-
     const riskInfo = WSSI_TO_RISK[category];
-    const { vertices, components } = countGeometry(rawBand);
+    const { vertices, components } = countGeometry(smoothedBand);
     totalVertices += vertices;
     totalComponents += components;
 
-    console.log(`[WSSI] ${category} (RAW): ${vertices} vertices, ${components} components`);
+    console.log(`[WSSI] ${category}: ${vertices} vertices, ${components} components`);
 
     processedFeatures.push({
       type: 'Feature',
-      geometry: rawBand.geometry,
+      geometry: smoothedBand.geometry,
       properties: {
         day,
         category,
