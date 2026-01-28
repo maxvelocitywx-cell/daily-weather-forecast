@@ -545,13 +545,35 @@ export default function WSSIImpactsClient() {
           {/* Probability Legend - Bottom Center */}
           {mapLoaded && (
             <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10">
-              <div className="bg-mv-bg-secondary/90 backdrop-blur-sm rounded-lg border border-white/10 p-2 shadow-lg">
-                <img
-                  src="https://www.wpc.ncep.noaa.gov/wwd/wssi/images/pwssi/pwssi_legend2.png"
-                  alt="WSSI Probability Legend"
-                  className="h-8"
-                  style={{ imageRendering: 'crisp-edges' }}
-                />
+              <div className="bg-mv-bg-secondary/95 backdrop-blur-sm rounded-xl border border-white/10 p-3 shadow-xl">
+                <div className="text-xs font-semibold text-mv-text-primary mb-2 text-center">
+                  Probability of {SEVERITY_LEVELS.find(s => s.id === selectedSeverity)?.label}+ Impacts
+                </div>
+                <div className="flex items-center gap-0.5">
+                  {/* Color bar segments */}
+                  {[
+                    { pct: '<10%', color: 'rgb(255, 255, 255)' },
+                    { pct: '10-20%', color: 'rgb(255, 255, 204)' },
+                    { pct: '20-30%', color: 'rgb(255, 237, 160)' },
+                    { pct: '30-40%', color: 'rgb(254, 217, 118)' },
+                    { pct: '40-50%', color: 'rgb(254, 178, 76)' },
+                    { pct: '50-60%', color: 'rgb(253, 141, 60)' },
+                    { pct: '60-70%', color: 'rgb(252, 78, 42)' },
+                    { pct: '70-80%', color: 'rgb(227, 26, 28)' },
+                    { pct: '80-90%', color: 'rgb(189, 0, 38)' },
+                    { pct: '90-100%', color: 'rgb(128, 0, 38)' },
+                  ].map((item, idx) => (
+                    <div key={idx} className="flex flex-col items-center">
+                      <div
+                        className="w-10 h-5 first:rounded-l-md last:rounded-r-md"
+                        style={{ backgroundColor: item.color }}
+                      />
+                      <span className="text-[9px] text-mv-text-muted mt-1 whitespace-nowrap">
+                        {item.pct}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           )}
