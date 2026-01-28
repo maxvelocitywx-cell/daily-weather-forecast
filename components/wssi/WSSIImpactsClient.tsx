@@ -544,31 +544,31 @@ export default function WSSIImpactsClient() {
 
           {/* Probability Legend - Bottom Center */}
           {mapLoaded && (
-            <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10">
-              <div className="bg-mv-bg-secondary/95 backdrop-blur-sm rounded-xl border border-white/10 p-3 shadow-xl">
-                <div className="text-xs font-semibold text-mv-text-primary mb-2 text-center">
+            <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-10">
+              <div className="bg-mv-bg-secondary/95 backdrop-blur-sm rounded-xl border border-white/10 p-4 shadow-xl">
+                <div className="text-sm font-semibold text-mv-text-primary mb-3 text-center">
                   Probability of {SEVERITY_LEVELS.find(s => s.id === selectedSeverity)?.label}+ Impacts
                 </div>
-                <div className="flex items-center gap-0.5">
-                  {/* Color bar segments */}
+                <div className="flex items-center">
+                  {/* Color bar segments - exact WPC colors */}
                   {[
-                    { pct: '<10%', color: 'rgb(255, 255, 255)' },
-                    { pct: '10-20%', color: 'rgb(255, 255, 204)' },
-                    { pct: '20-30%', color: 'rgb(255, 237, 160)' },
-                    { pct: '30-40%', color: 'rgb(254, 217, 118)' },
-                    { pct: '40-50%', color: 'rgb(254, 178, 76)' },
-                    { pct: '50-60%', color: 'rgb(253, 141, 60)' },
-                    { pct: '60-70%', color: 'rgb(252, 78, 42)' },
-                    { pct: '70-80%', color: 'rgb(227, 26, 28)' },
-                    { pct: '80-90%', color: 'rgb(189, 0, 38)' },
-                    { pct: '90-100%', color: 'rgb(128, 0, 38)' },
-                  ].map((item, idx) => (
+                    { pct: '<10%', color: '#ffffff' },
+                    { pct: '10%', color: '#ffffd4' },
+                    { pct: '20%', color: '#fee391' },
+                    { pct: '30%', color: '#fec44f' },
+                    { pct: '40%', color: '#fe9929' },
+                    { pct: '50%', color: '#ec7014' },
+                    { pct: '60%', color: '#cc4c02' },
+                    { pct: '70%', color: '#993404' },
+                    { pct: '80%', color: '#662506' },
+                    { pct: '90%', color: '#4d1c04' },
+                  ].map((item, idx, arr) => (
                     <div key={idx} className="flex flex-col items-center">
                       <div
-                        className="w-10 h-5 first:rounded-l-md last:rounded-r-md"
+                        className={`w-12 h-6 ${idx === 0 ? 'rounded-l-md' : ''} ${idx === arr.length - 1 ? 'rounded-r-md' : ''}`}
                         style={{ backgroundColor: item.color }}
                       />
-                      <span className="text-[9px] text-mv-text-muted mt-1 whitespace-nowrap">
+                      <span className="text-[10px] text-mv-text-muted mt-1.5 whitespace-nowrap">
                         {item.pct}
                       </span>
                     </div>
