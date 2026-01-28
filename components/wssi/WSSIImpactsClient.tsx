@@ -430,44 +430,6 @@ export default function WSSIImpactsClient() {
             />
           </section>
 
-          {/* Legend */}
-          <section>
-            <h3 className="text-sm font-semibold text-mv-text-primary mb-3">Probability Legend</h3>
-            <div className="bg-black/30 rounded-lg p-3">
-              <img
-                src="https://www.wpc.ncep.noaa.gov/wwd/wssi/images/pwssi/WSSI_P_website_legend_v2p1.png"
-                alt="WSSI Probability Legend"
-                className="w-full"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = 'none';
-                }}
-              />
-              {/* Fallback legend */}
-              <div className="space-y-1 text-xs">
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-3 rounded" style={{ backgroundColor: '#fee2e2' }} />
-                  <span className="text-mv-text-muted">10-20%</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-3 rounded" style={{ backgroundColor: '#fca5a5' }} />
-                  <span className="text-mv-text-muted">20-40%</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-3 rounded" style={{ backgroundColor: '#f87171' }} />
-                  <span className="text-mv-text-muted">40-60%</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-3 rounded" style={{ backgroundColor: '#ef4444' }} />
-                  <span className="text-mv-text-muted">60-80%</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-3 rounded" style={{ backgroundColor: '#b91c1c' }} />
-                  <span className="text-mv-text-muted">80-100%</span>
-                </div>
-              </div>
-            </div>
-          </section>
-
           {/* Info */}
           <section className="text-xs text-mv-text-muted space-y-2">
             <p>
@@ -572,10 +534,24 @@ export default function WSSIImpactsClient() {
 
           {/* Click hint */}
           {!clickInfo && mapLoaded && (
-            <div className="absolute bottom-28 left-4 z-10">
+            <div className="absolute bottom-32 left-4 z-10">
               <div className="bg-mv-bg-secondary/80 backdrop-blur-sm text-mv-text-muted px-3 py-1.5 rounded-lg text-xs flex items-center gap-2 border border-white/10">
                 <MapPin size={12} className="text-cyan-400" />
                 Click map for probability details
+              </div>
+            </div>
+          )}
+
+          {/* Probability Legend - Bottom Center */}
+          {mapLoaded && (
+            <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10">
+              <div className="bg-mv-bg-secondary/90 backdrop-blur-sm rounded-lg border border-white/10 p-2 shadow-lg">
+                <img
+                  src="https://www.wpc.ncep.noaa.gov/wwd/wssi/images/pwssi/pwssi_legend2.png"
+                  alt="WSSI Probability Legend"
+                  className="h-8"
+                  style={{ imageRendering: 'crisp-edges' }}
+                />
               </div>
             </div>
           )}
