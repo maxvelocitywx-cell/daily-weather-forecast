@@ -550,18 +550,18 @@ export default function WSSIImpactsClient() {
                   Probability of {SEVERITY_LEVELS.find(s => s.id === selectedSeverity)?.label}+ Impacts
                 </div>
                 <div className="flex items-center">
-                  {/* Color bar segments - exact WPC colors */}
+                  {/* Color bar segments - WPC colors: dark blue → light blue → yellow → orange → red → dark red/brown */}
                   {[
-                    { pct: '<10%', color: '#ffffff' },
-                    { pct: '10%', color: '#ffffd4' },
-                    { pct: '20%', color: '#fee391' },
-                    { pct: '30%', color: '#fec44f' },
-                    { pct: '40%', color: '#fe9929' },
-                    { pct: '50%', color: '#ec7014' },
-                    { pct: '60%', color: '#cc4c02' },
-                    { pct: '70%', color: '#993404' },
-                    { pct: '80%', color: '#662506' },
-                    { pct: '90%', color: '#4d1c04' },
+                    { pct: '<10%', color: '#08306b' },
+                    { pct: '10%', color: '#2171b5' },
+                    { pct: '20%', color: '#6baed6' },
+                    { pct: '30%', color: '#c6dbef' },
+                    { pct: '40%', color: '#ffffb2' },
+                    { pct: '50%', color: '#fecc5c' },
+                    { pct: '60%', color: '#fd8d3c' },
+                    { pct: '70%', color: '#f03b20' },
+                    { pct: '80%', color: '#bd0026' },
+                    { pct: '90%', color: '#67000d' },
                   ].map((item, idx, arr) => (
                     <div key={idx} className="flex flex-col items-center">
                       <div
